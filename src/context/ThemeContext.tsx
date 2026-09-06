@@ -1,44 +1,37 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { THEME_KEY } from '../lib/types'
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
+
+const THEME_KEY = 'porcigranja.theme'
 
 type Theme = 'light' | 'dark'
 
-const ThemeContext = createContext<{
+type ThemeContextValue = {
   theme: Theme
   toggle: () => void
-} | null>(null)
+}
+
+const ThemeContext = createContext<ThemeContextValue | null>(null)
 
 function readTheme(): Theme {
   const saved = localStorage.getItem(THEME_KEY)
-  if (saved === 'light' || saved === 'dark') return saved
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  return saved === 'dark' ? 'dark' : 'light'
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => {
-    const initial = readTheme()
-    document.documentElement.dataset.theme = initial
-    return initial
-  })
+  const [theme, setTheme] = useState<Theme>(readTheme)
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme
+    document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
-  return (
-    <ThemeContext.Provider
-      value={{
-        theme,
-        toggle: () => setTheme((t) => (t === 'dark' ? 'light' : 'dark')),
-      }}
-    >
-      {children}
-    </ThemeContext.Provider>
-  )
+  const toggle = useCallback(() => {
+    setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+  }, [])
+
+  return <ThemeContext.Provider value={{ theme, toggle }}>{children}</ThemeContext.Provider>
 }
 
-export function useTheme() {
+export function useTheme(): ThemeContextValue {
   const ctx = useContext(ThemeContext)
   if (!ctx) throw new Error('useTheme debe usarse dentro de ThemeProvider')
   return ctx

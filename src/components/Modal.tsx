@@ -2,20 +2,20 @@ import type { ReactNode } from 'react'
 
 export default function Modal({
   title,
-  children,
   onClose,
+  children,
 }: {
   title: string
-  children: ReactNode
   onClose: () => void
+  children: ReactNode
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
-      <button className="absolute inset-0 cursor-default" aria-label="Cerrar" onClick={onClose} />
-      <div className="surface relative z-10 w-full max-w-lg rounded-3xl p-5">
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+      <button className="absolute inset-0 bg-black/40" onClick={onClose} type="button" aria-label="Cerrar" />
+      <div className="surface relative z-10 max-h-[90svh] w-full max-w-lg overflow-y-auto rounded-3xl p-5">
         <div className="mb-4 flex items-start justify-between gap-3">
-          <h2 className="font-display text-2xl">{title}</h2>
-          <button className="btn btn-ghost px-3 py-1" onClick={onClose}>
+          <h3 className="font-display text-2xl">{title}</h3>
+          <button className="btn btn-ghost" onClick={onClose} type="button">
             Cerrar
           </button>
         </div>

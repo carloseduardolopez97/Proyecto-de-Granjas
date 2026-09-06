@@ -1,139 +1,87 @@
-export type ProgramMode = 'engorde' | 'reproduccion' | 'ciclo_completo'
+export type StockUnit = 'ml' | 'cc' | 'sobre' | 'litro' | 'pastilla' | 'kg'
 
-export type Medication = {
+export const STOCK_UNITS: Array<{ value: StockUnit; label: string; hint: string }> = [
+  { value: 'ml', label: 'Inyectable (ml)', hint: 'Frascos o envases medidos en mililitros' },
+  { value: 'cc', label: 'Inyectable (cc)', hint: 'Frascos o envases medidos en centímetros cúbicos' },
+  { value: 'sobre', label: 'Sobres', hint: 'Polvo o soluble, típico para el agua' },
+  { value: 'litro', label: 'Litros', hint: 'Líquido a granel o para el agua' },
+  { value: 'pastilla', label: 'Pastillas', hint: 'Tabletas o comprimidos' },
+  { value: 'kg', label: 'Kilogramos', hint: 'Polvo o premix a granel' },
+]
+
+export type CostCurrency = 'COP' | 'USD'
+
+export type MedicationEntry = {
   id: string
   name: string
-  presentation: string
-  unit: string
-  packageQty: number
-  packageCost: number
-  unitPrice: number
-  stock: number
-  minStock: number
-  notes: string
-}
-
-export type FormulaLine = {
-  medicationId: string
-  quantity: number
-}
-
-export type Formula = {
-  id: string
-  name: string
-  indication: string
-  lines: FormulaLine[]
-}
-
-export type LotStage = 'destete' | 'engorde'
-export type LotStatus = 'activa' | 'transferida' | 'cerrada'
-export type LotSortMode = 'arrival' | 'custom'
-
-export type LotVaccinePlan = {
-  id: string
-  name: string
-  dueDate: string
-  applied: boolean
-}
-
-export type LotSupplier = {
-  id: string
-  name: string
-  headcount: number
-  totalWeightKg: number
-  vaccines: LotVaccinePlan[]
-}
-
-export type Lot = {
-  id: string
-  name: string
-  cageOrName: string
-  stage: LotStage
-  status: LotStatus
-  lineageId: string
-  parentLotId: string | null
-  entryDate: string
-  ageAtEntryDays: number
-  initialHeadcount: number
-  currentHeadcount: number
-  transferredOut: number
-  purchaseCost: number
-  targetWeightKg: number
-  salePricePerKg: number
-  notes: string
-  suppliers: LotSupplier[]
-  sortIndex: number
-}
-
-export type LotEventType =
-  | 'alimento'
-  | 'vacuna'
-  | 'medicamento'
-  | 'formula'
-  | 'mortalidad'
-  | 'inventario'
-  | 'enfermedad'
-  | 'transferencia'
-  | 'venta'
-
-export type LotEvent = {
-  id: string
-  lotId: string
   date: string
-  type: LotEventType
   quantity: number
+  size: number
+  unit: StockUnit
   cost: number
-  notes: string
-  formulaId?: string
-  doses?: number
-  diseaseName?: string
-  feedId?: string
-  relatedLotId?: string
-  revenue?: number
+  remaining: number
+  costCurrency: CostCurrency
+  usdAmount?: number
+  usdRate?: number
 }
 
-export type Disease = {
+export type InjectionLine = {
+  medicationName: string
+  amount: number
+  unit: StockUnit
+}
+
+export type Injection = {
   id: string
   name: string
+  lines: InjectionLine[]
 }
 
-export type FeedStorage = 'saco' | 'silo'
-
-export type Feed = {
+export type InjectionUse = {
   id: string
+  injectionId: string
+  date: string
+  doses: number
+  cost: number
+}
+
+export type MedicationProfile = {
   name: string
-  storage: FeedStorage
-  sackWeightKg: number
-  quintalKg: number
-  stockSacks: number
-  stockQuintales: number
-  lastUnitCost: number
-  unitPrice: number
-  minStock: number
-  notes: string
+  unit: StockUnit
+  size: number
+  lastQuantity: number
+  lastCost: number
 }
 
-export type FeedEntry = {
+export type MedicationPurchase = {
   id: string
-  feedId: string
+  entryId?: string
+  name: string
   date: string
   quantity: number
-  totalCost: number
-  notes: string
+  size: number
+  unit: StockUnit
+  cost: number
+  costCurrency: CostCurrency
+  usdAmount?: number
+  usdRate?: number
 }
 
-export type FarmState = {
-  farmName: string
-  currency: string
-  medications: Medication[]
-  formulas: Formula[]
-  feeds: Feed[]
-  feedEntries: FeedEntry[]
-  lots: Lot[]
-  events: LotEvent[]
-  diseases: Disease[]
-  lotSortMode: LotSortMode
+export type DismissedAlert = {
+  key: string
+  level: 'empty' | 'low'
+  purchaseGen: string
 }
 
-export const STORAGE_KEY = 'porcigranja.v1'
+export type PharmacyState = {
+  entries: MedicationEntry[]
+  injections: Injection[]
+  uses: InjectionUse[]
+  catalog: MedicationProfile[]
+  dismissedAlerts: DismissedAlert[]
+  purchases: MedicationPurchase[]
+  lastUsdRate?: number
+}
+
+export const STORAGE_KEY = 'porcigranja.farmacia.v1'
 export const THEME_KEY = 'porcigranja.theme'

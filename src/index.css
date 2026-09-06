@@ -103,10 +103,16 @@ body {
   color: #f7f3ea;
 }
 
-.btn-ghost {
-  background: transparent;
-  border-color: var(--line);
+.btn-icon {
+  padding: 0.35rem;
+  width: 2rem;
+  height: 2rem;
+  color: var(--muted);
+}
+
+.btn-icon:hover {
   color: var(--ink);
+  background: var(--bg-muted);
 }
 
 .btn-clay {
