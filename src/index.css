@@ -89,6 +89,12 @@ body {
   transform: translateY(-1px);
 }
 
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
 .btn-primary {
   background: var(--moss);
   color: #f7f3ea;
@@ -157,4 +163,34 @@ body {
 
 [data-theme='dark'] .chip {
   color: var(--ink);
+}
+
+.fab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.4rem;
+  height: 3.4rem;
+  border: none;
+  border-radius: 999px;
+  background: var(--moss);
+  color: #f7f3ea;
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+[data-theme='dark'] .fab {
+  color: #121410;
+}
+
+.fab-plus {
+  display: block;
+  transition: transform 0.15s ease;
+}
+
+.fab-plus-open {
+  transform: rotate(45deg);
 }

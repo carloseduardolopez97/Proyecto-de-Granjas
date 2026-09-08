@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { applyInjectionUse, costInCop, entryStockAmount, normalizeName, remainingAfterEdit, uid, unitLabel, unitsMatch, upsertCatalog, upsertPurchaseForEntry, usesPackageSize } from '../lib/calc'
 import { loadPharmacy, savePharmacy } from '../lib/storage'
-import type { CostCurrency, DismissedAlert, Injection, InjectionLine, MedicationEntry, PharmacyState, StockUnit } from '../lib/types'
+import type { CostCurrency, DismissedAlert, FarmStage, Injection, InjectionLine, InjectionUseAllocation, MedicationEntry, PharmacyState, StockUnit } from '../lib/types'
 
 export type NewEntryInput = {
   name: string
@@ -24,12 +24,48 @@ type PharmacyContextValue = {
   addInjection: (name: string, lines: InjectionLine[]) => string | null
   updateInjection: (id: string, name: string, lines: InjectionLine[]) => string | null
   deleteInjection: (id: string) => void
-  useInjection: (injectionId: string, doses: number, date: string) => string | null
+  useInjection: (
+    injectionId: string,
+    doses: number,
+    date: string,
+    stage: FarmStage,
+    allocations?: InjectionUseAllocation[] | null,
+  ) => string | null
   updatePurchase: (id: string, input: NewEntryInput) => string | null
   deletePurchase: (id: string) => void
-  updateUse: (id: string, date: string, doses: number) => string | null
+  updateUse: (
+    id: string,
+    date: string,
+    doses: number,
+    stage: FarmStage,
+    allocations?: InjectionUseAllocation[] | null,
+  ) => string | null
   deleteUse: (id: string) => void
   dismissRestockAlerts: (items: DismissedAlert[]) => void
+}
+
+function parseAllocations(
+  allocations: InjectionUseAllocation[] | null | undefined,
+  doses: number,
+): InjectionUseAllocation[] | string {
+  if (allocations == null) return []
+  const filled = allocations.filter((item) => item.locationId && item.doses > 0)
+  if (filled.length === 0) return []
+  const ids = filled.map((item) => item.locationId)
+  if (new Set(ids).size !== ids.length) {
+    return 'No repitas la misma jaula. Junta esas cantidades en una sola línea.'
+  }
+  for (const item of filled) {
+    if (!Number.isInteger(item.doses) || item.doses <= 0) {
+      return 'La cantidad de cada jaula debe ser un número entero mayor a 0.'
+    }
+    if (!item.location.trim()) return 'Elige una jaula de la lista.'
+  }
+  const sum = filled.reduce((total, item) => total + item.doses, 0)
+  if (sum !== doses) {
+    return `Las cantidades de las jaulas deben sumar ${doses} dosis.`
+  }
+  return filled
 }
 
 const PharmacyContext = createContext<PharmacyContextValue | null>(null)
@@ -222,12 +258,33 @@ export function PharmacyProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const deleteInjection = useCallback((id: string) => {
-    setState((s) => ({ ...s, injections: s.injections.filter((item) => item.id !== id) }))
+    setState((s) => {
+      const name = s.injections.find((item) => item.id === id)?.name.trim() ?? ''
+      return {
+        ...s,
+        injections: s.injections.filter((item) => item.id !== id),
+        uses: name
+          ? s.uses.map((use) =>
+              use.injectionId === id && !use.injectionName ? { ...use, injectionName: name } : use,
+            )
+          : s.uses,
+      }
+    })
   }, [])
 
-  const useInjection = useCallback((injectionId: string, doses: number, date: string): string | null => {
+  const useInjection = useCallback(
+    (
+      injectionId: string,
+      doses: number,
+      date: string,
+      stage: FarmStage,
+      allocations?: InjectionUseAllocation[] | null,
+    ): string | null => {
     if (doses <= 0) return 'Indica cuántas dosis se usaron.'
     if (!date) return 'Indica la fecha de uso.'
+    if (stage !== 'engorde' && stage !== 'destete') return 'Indica si el uso fue en destete o en engorde.'
+    const parsed = parseAllocations(allocations, doses)
+    if (typeof parsed === 'string') return parsed
     const injection = state.injections.find((item) => item.id === injectionId)
     if (!injection) return 'No se encontró la inyección.'
 
@@ -241,7 +298,19 @@ export function PharmacyProvider({ children }: { children: ReactNode }) {
     setState((s) => ({
       ...s,
       entries: result.entries,
-      uses: [{ id: uid(), injectionId, date, doses, cost: result.cost }, ...s.uses],
+      uses: [
+        {
+          id: uid(),
+          injectionId,
+          date,
+          doses,
+          cost: result.cost,
+          injectionName: injection.name,
+          stage,
+          allocations: parsed,
+        },
+        ...s.uses,
+      ],
     }))
     return null
   }, [state.entries, state.injections])
@@ -297,15 +366,39 @@ export function PharmacyProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const updateUse = useCallback((id: string, date: string, doses: number): string | null => {
-    if (doses <= 0) return 'Indica cuántas dosis se usaron.'
-    if (!date) return 'Indica la fecha de uso.'
-    setState((s) => ({
-      ...s,
-      uses: s.uses.map((item) => (item.id === id ? { ...item, date, doses } : item)),
-    }))
-    return null
-  }, [])
+  const updateUse = useCallback(
+    (
+      id: string,
+      date: string,
+      doses: number,
+      stage: FarmStage,
+      allocations?: InjectionUseAllocation[] | null,
+    ): string | null => {
+      if (doses <= 0) return 'Indica cuántas dosis se usaron.'
+      if (!date) return 'Indica la fecha de uso.'
+      if (stage !== 'engorde' && stage !== 'destete') return 'Indica si el uso fue en destete o en engorde.'
+      const parsed = parseAllocations(allocations, doses)
+      if (typeof parsed === 'string') return parsed
+      setState((s) => ({
+        ...s,
+        uses: s.uses.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                date,
+                doses,
+                stage,
+                allocations: parsed,
+                locationId: '',
+                location: '',
+              }
+            : item,
+        ),
+      }))
+      return null
+    },
+    [],
+  )
 
   const deleteUse = useCallback((id: string) => {
     setState((s) => ({ ...s, uses: s.uses.filter((item) => item.id !== id) }))

@@ -1,17 +1,25 @@
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import Modal from '../components/Modal'
+import { Link } from 'react-router-dom'
+import FarmStageFields from '../components/FarmStageFields'
+import { ClearFiltersButton, FilterField, HistoryFilterBar, inDateRange, uniqueSorted } from '../components/HistoryFilters'
+import Modal, { afterSaveReadyForNext, SavedNotice } from '../components/Modal'
+import { useCepa } from '../context/CepaContext'
 import { usePharmacy } from '../context/PharmacyContext'
 import {
   applyInjectionUse,
   costInCop,
+  farmStageLabel,
   formatMoney,
   formatQty,
   formatUnitPrice,
   formatUsd,
+  formatUseAllocations,
   formatVolumeMl,
+  injectionUseStage,
   injectionUseSummary,
   isVolumeUnit,
   isAlertDismissed,
+  mergeLocationCatalogs,
   mergePurchases,
   packPriceLabel,
   pharmacyRestockAlerts,
@@ -25,11 +33,14 @@ import {
   todayIso,
   toDismissedAlert,
   totalInventoryCost,
+  uid,
   unitLabel,
   unitsMatch,
+  useInjectionLabel,
   usesPackageSize,
 } from '../lib/calc'
-import { STOCK_UNITS, type CostCurrency, type Injection, type InjectionLine, type InjectionUse, type MedicationEntry, type MedicationProfile, type MedicationPurchase, type StockUnit } from '../lib/types'
+import { useQuickAdd } from '../lib/quickAdd'
+import { STOCK_UNITS, type CostCurrency, type CepaLocation, type FarmStage, type Injection, type InjectionLine, type InjectionUse, type InjectionUseAllocation, type MedicationEntry, type MedicationProfile, type MedicationPurchase, type StockUnit } from '../lib/types'
 
 export default function PharmacyPage() {
   const {
@@ -47,6 +58,9 @@ export default function PharmacyPage() {
     deleteUse,
     dismissRestockAlerts,
   } = usePharmacy()
+  const { state: cepaState } = useCepa()
+  const desteteLocations = cepaState.locations ?? []
+  const engordeLocations = mergeLocationCatalogs(desteteLocations, cepaState.engordeLocations ?? [])
   const [entryOpen, setEntryOpen] = useState(false)
   const [editingEntry, setEditingEntry] = useState<MedicationEntry | null>(null)
   const [restocking, setRestocking] = useState<{ name: string; unit: StockUnit } | null>(null)
@@ -55,6 +69,7 @@ export default function PharmacyPage() {
   const [injectionOpen, setInjectionOpen] = useState(false)
   const [editing, setEditing] = useState<Injection | null>(null)
   const [useOpen, setUseOpen] = useState<string | null>(null)
+  const [pickUse, setPickUse] = useState(false)
   const [confirm, setConfirm] = useState<
     | { kind: 'medication'; name: string; unit: StockUnit }
     | { kind: 'injection'; id: string; name: string }
@@ -62,6 +77,30 @@ export default function PharmacyPage() {
     | { kind: 'use'; id: string; name: string }
     | null
   >(null)
+  const [buyName, setBuyName] = useState('')
+  const [buyFrom, setBuyFrom] = useState('')
+  const [buyTo, setBuyTo] = useState('')
+  const [buyChange, setBuyChange] = useState('')
+  const [useName, setUseName] = useState('')
+  const [useStage, setUseStage] = useState<FarmStage | ''>('')
+  const [useFrom, setUseFrom] = useState('')
+  const [useTo, setUseTo] = useState('')
+
+  useQuickAdd({
+    medicamento: () => {
+      setEntryOpen(true)
+    },
+    inyeccion: () => {
+      setInjectionOpen(true)
+    },
+    uso: () => {
+      if (state.injections.length === 1) {
+        setUseOpen(state.injections[0].id)
+        return
+      }
+      setPickUse(true)
+    },
+  })
 
   const stock = useMemo(() => stockByMedication(state.entries), [state.entries])
   const alerts = useMemo(() => {
@@ -74,6 +113,57 @@ export default function PharmacyPage() {
     () => purchaseHistoryRows(mergePurchases(state.purchases, state.entries)),
     [state.purchases, state.entries],
   )
+  const buyNames = useMemo(() => uniqueSorted(purchaseRows.map((row) => row.purchase.name)), [purchaseRows])
+  const visiblePurchases = useMemo(
+    () =>
+      purchaseRows.filter(
+        (row) =>
+          (!buyName || row.purchase.name === buyName) &&
+          (!buyChange || row.change === buyChange) &&
+          inDateRange(row.purchase.date, buyFrom, buyTo),
+      ),
+    [purchaseRows, buyName, buyChange, buyFrom, buyTo],
+  )
+  const purchaseTotal = useMemo(
+    () => visiblePurchases.reduce((sum, row) => sum + row.purchase.cost, 0),
+    [visiblePurchases],
+  )
+  const purchaseUnitTotal = useMemo(() => {
+    const value = visiblePurchases.reduce((sum, row) => sum + row.unitCost, 0)
+    const units = new Set(visiblePurchases.map((row) => row.displayUnit))
+    return {
+      value,
+      unit: units.size === 1 ? [...units][0] : null,
+    }
+  }, [visiblePurchases])
+  const purchaseMedCount = useMemo(
+    () => new Set(visiblePurchases.map((row) => row.purchase.name.trim())).size,
+    [visiblePurchases],
+  )
+  const useRows = useMemo(
+    () =>
+      state.uses.map((use) => ({
+        use,
+        name: useInjectionLabel(use, state.injections),
+      })),
+    [state.uses, state.injections],
+  )
+  const injectionNames = useMemo(
+    () => uniqueSorted(useRows.map((row) => row.name).filter(Boolean)),
+    [useRows],
+  )
+  const visibleUses = useMemo(
+    () =>
+      useRows.filter(
+        (row) =>
+          (!useName || row.name === useName) &&
+          (!useStage || injectionUseStage(row.use) === useStage) &&
+          inDateRange(row.use.date, useFrom, useTo),
+      ),
+    [useRows, useName, useFrom, useTo, useStage],
+  )
+  const useDoseTotal = useMemo(() => visibleUses.reduce((sum, row) => sum + row.use.doses, 0), [visibleUses])
+  const useCostTotal = useMemo(() => visibleUses.reduce((sum, row) => sum + (row.use.cost ?? 0), 0), [visibleUses])
   const usage = useMemo(
     () => injectionUseSummary(state.uses, state.injections),
     [state.uses, state.injections],
@@ -219,7 +309,46 @@ export default function PharmacyPage() {
         <p className="mb-8 text-[var(--muted)]">Cuando registres una compra, aparecerá aquí.</p>
       ) : (
         <div className="mb-8 overflow-x-auto">
-          <table className="w-full min-w-[640px] text-left text-sm">
+          <HistoryFilterBar>
+            <FilterField label="Medicamento">
+              <select className="field" value={buyName} onChange={(e) => setBuyName(e.target.value)}>
+                <option value="">Todos</option>
+                {buyNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </FilterField>
+            <FilterField label="Cambio">
+              <select className="field" value={buyChange} onChange={(e) => setBuyChange(e.target.value)}>
+                <option value="">Todos</option>
+                <option value="first">Primera compra</option>
+                <option value="up">Subió</option>
+                <option value="down">Bajó</option>
+                <option value="same">Mismo precio</option>
+              </select>
+            </FilterField>
+            <FilterField label="Desde">
+              <input className="field" type="date" value={buyFrom} onChange={(e) => setBuyFrom(e.target.value)} />
+            </FilterField>
+            <FilterField label="Hasta">
+              <input className="field" type="date" value={buyTo} onChange={(e) => setBuyTo(e.target.value)} />
+            </FilterField>
+            <ClearFiltersButton
+              disabled={!buyName && !buyChange && !buyFrom && !buyTo}
+              onClick={() => {
+                setBuyName('')
+                setBuyChange('')
+                setBuyFrom('')
+                setBuyTo('')
+              }}
+            />
+          </HistoryFilterBar>
+          {visiblePurchases.length === 0 ? (
+            <p className="mt-3 text-[var(--muted)]">Ninguna compra coincide con esos filtros.</p>
+          ) : (
+          <table className="mt-4 w-full min-w-[640px] text-left text-sm">
             <thead>
               <tr className="text-[var(--muted)]">
                 <th className="pb-2 font-semibold">Fecha</th>
@@ -233,7 +362,7 @@ export default function PharmacyPage() {
               </tr>
             </thead>
             <tbody>
-              {purchaseRows.map((row) => (
+              {visiblePurchases.map((row) => (
                 <tr key={row.purchase.id} className="border-t border-[var(--line)]">
                   <td className="py-2">{row.purchase.date}</td>
                   <td className="py-2">{row.purchase.name}</td>
@@ -284,7 +413,28 @@ export default function PharmacyPage() {
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-[var(--line)]">
+                <td className="py-2 font-semibold" colSpan={3}>
+                  Total
+                  <span className="mt-0.5 block text-sm font-medium text-[var(--muted)]">
+                    {purchaseMedCount} {purchaseMedCount === 1 ? 'medicamento' : 'medicamentos'}
+                    {visiblePurchases.length !== purchaseMedCount
+                      ? ` · ${visiblePurchases.length} compras`
+                      : ''}
+                  </span>
+                </td>
+                <td className="py-2 font-semibold">{formatMoney(purchaseTotal)}</td>
+                <td className="py-2" />
+                <td className="py-2 font-semibold">
+                  {formatUnitPrice(purchaseUnitTotal.value)}
+                  {purchaseUnitTotal.unit ? ` / ${unitLabel(purchaseUnitTotal.unit)}` : ''}
+                </td>
+                <td className="py-2" colSpan={2} />
+              </tr>
+            </tfoot>
           </table>
+          )}
         </div>
       )}
 
@@ -347,24 +497,82 @@ export default function PharmacyPage() {
         <p className="text-[var(--muted)]">Cuando registres un uso, aparecerá aquí.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[480px] text-left text-sm">
+          <p className="mb-3 text-sm text-[var(--muted)]">
+            Aquí puedes ver en qué etapa se usó cada inyección y, si quieres, a qué jaula. Al registrar
+            el uso hay que indicar destete o engorde; la jaula es opcional. Las jaulas se crean en{' '}
+            <Link className="font-semibold underline" to="/ajustes">
+              Ajustes
+            </Link>
+            .
+          </p>
+          <HistoryFilterBar>
+            <FilterField label="Inyección">
+              <select className="field" value={useName} onChange={(e) => setUseName(e.target.value)}>
+                <option value="">Todas</option>
+                {injectionNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </FilterField>
+            <FilterField label="Etapa">
+              <select
+                className="field"
+                value={useStage}
+                onChange={(e) => setUseStage((e.target.value || '') as FarmStage | '')}
+              >
+                <option value="">Todas</option>
+                <option value="destete">Destete</option>
+                <option value="engorde">Engorde</option>
+              </select>
+            </FilterField>
+            <FilterField label="Desde">
+              <input className="field" type="date" value={useFrom} onChange={(e) => setUseFrom(e.target.value)} />
+            </FilterField>
+            <FilterField label="Hasta">
+              <input className="field" type="date" value={useTo} onChange={(e) => setUseTo(e.target.value)} />
+            </FilterField>
+            <ClearFiltersButton
+                disabled={!useName && !useStage && !useFrom && !useTo}
+                onClick={() => {
+                  setUseName('')
+                  setUseStage('')
+                  setUseFrom('')
+                  setUseTo('')
+                }}
+            />
+          </HistoryFilterBar>
+          {visibleUses.length === 0 ? (
+            <p className="mt-3 text-[var(--muted)]">Ningún uso coincide con esos filtros.</p>
+          ) : (
+          <table className="mt-4 w-full min-w-[640px] text-left text-sm">
             <thead>
               <tr className="text-[var(--muted)]">
                 <th className="pb-2 font-semibold">Fecha</th>
+                <th className="pb-2 font-semibold">Etapa</th>
                 <th className="pb-2 font-semibold">Inyección</th>
+                <th className="pb-2 font-semibold">Jaula</th>
                 <th className="pb-2 font-semibold">Dosis</th>
                 <th className="pb-2 font-semibold">Costo</th>
                 <th className="pb-2 font-semibold"> </th>
               </tr>
             </thead>
             <tbody>
-              {state.uses.map((use) => {
-                const injection = state.injections.find((item) => item.id === use.injectionId)
-                const useName = injection?.name ?? 'Inyección eliminada'
-                return (
+              {visibleUses.map(({ use, name: useNameLabel }) => (
                   <tr key={use.id} className="border-t border-[var(--line)]">
                     <td className="py-2">{use.date}</td>
-                    <td className="py-2">{useName}</td>
+                    <td className="py-2">{farmStageLabel(injectionUseStage(use))}</td>
+                    <td className="py-2">{useNameLabel || '—'}</td>
+                    <td className="py-2 min-w-[10rem]">
+                      <button
+                        className="btn btn-ghost"
+                        type="button"
+                        onClick={() => setEditingUse(use)}
+                      >
+                        {formatUseAllocations(use)}
+                      </button>
+                    </td>
                     <td className="py-2">{use.doses}</td>
                     <td className="py-2">{use.cost > 0 ? formatMoney(use.cost) : '—'}</td>
                     <td className="py-2">
@@ -374,17 +582,27 @@ export default function PharmacyPage() {
                         </IconButton>
                         <IconButton
                           label="Eliminar"
-                          onClick={() => setConfirm({ kind: 'use', id: use.id, name: useName })}
+                          onClick={() => setConfirm({ kind: 'use', id: use.id, name: useNameLabel })}
                         >
                           <TrashIcon />
                         </IconButton>
                       </div>
                     </td>
                   </tr>
-                )
-              })}
+              ))}
             </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-[var(--line)]">
+                <td className="py-2 font-semibold" colSpan={4}>
+                  Total
+                </td>
+                <td className="py-2 font-semibold">{useDoseTotal}</td>
+                <td className="py-2 font-semibold">{useCostTotal > 0 ? formatMoney(useCostTotal) : '—'}</td>
+                <td className="py-2" />
+              </tr>
+            </tfoot>
           </table>
+          )}
         </div>
       )}
 
@@ -424,10 +642,15 @@ export default function PharmacyPage() {
                 ? updatePurchase(editingPurchase.id, payload)
                 : addEntry(payload)
             if (message) return message
-            setEntryOpen(false)
-            setEditingEntry(null)
-            setEditingPurchase(null)
-            setRestocking(null)
+            if (editingEntry || editingPurchase) {
+              setEntryOpen(false)
+              setEditingEntry(null)
+              setEditingPurchase(null)
+              setRestocking(null)
+            } else {
+              setRestocking(null)
+              setEntryOpen(true)
+            }
             return null
           }}
         />
@@ -437,6 +660,7 @@ export default function PharmacyPage() {
         <InjectionModal
           title={editing ? 'Editar inyección' : 'Añadir inyección'}
           knownMeds={knownMeds}
+          isEdit={Boolean(editing)}
           initialName={editing?.name ?? ''}
           initialLines={editing?.lines}
           onClose={() => {
@@ -448,22 +672,52 @@ export default function PharmacyPage() {
               ? updateInjection(editing.id, injectionName, lines)
               : addInjection(injectionName, lines)
             if (message) return message
-            setInjectionOpen(false)
-            setEditing(null)
+            if (editing) {
+              setInjectionOpen(false)
+              setEditing(null)
+            }
             return null
           }}
         />
+      )}
+
+      {pickUse && (
+        <Modal title="Registrar uso" onClose={() => setPickUse(false)}>
+          {state.injections.length === 0 ? (
+            <p className="text-[var(--muted)]">
+              Primero crea una inyección. Puedes hacerlo desde este mismo menú + o en Farmacia.
+            </p>
+          ) : (
+            <ul className="grid gap-2">
+              {state.injections.map((injection) => (
+                <li key={injection.id}>
+                  <button
+                    className="btn btn-ghost w-full justify-start"
+                    type="button"
+                    onClick={() => {
+                      setPickUse(false)
+                      setUseOpen(injection.id)
+                    }}
+                  >
+                    {injection.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Modal>
       )}
 
       {useOpen && (
         <UseModal
           injection={state.injections.find((item) => item.id === useOpen)}
           entries={state.entries}
+          desteteLocations={desteteLocations}
+          engordeLocations={engordeLocations}
           onClose={() => setUseOpen(null)}
-          onSave={(doses, useDate) => {
-            const message = useInjection(useOpen, doses, useDate)
+          onSave={(doses, useDate, stage, allocations) => {
+            const message = useInjection(useOpen, doses, useDate, stage, allocations)
             if (message) return message
-            setUseOpen(null)
             return null
           }}
         />
@@ -472,12 +726,12 @@ export default function PharmacyPage() {
       {editingUse && (
         <EditUseModal
           initial={editingUse}
-          injectionName={
-            state.injections.find((item) => item.id === editingUse.injectionId)?.name ?? 'Inyección eliminada'
-          }
+          injectionName={useInjectionLabel(editingUse, state.injections) || 'Uso'}
+          desteteLocations={desteteLocations}
+          engordeLocations={engordeLocations}
           onClose={() => setEditingUse(null)}
-          onSave={(doses, useDate) => {
-            const message = updateUse(editingUse.id, useDate, doses)
+          onSave={(doses, useDate, stage, allocations) => {
+            const message = updateUse(editingUse.id, useDate, doses, stage, allocations)
             if (message) return message
             setEditingUse(null)
             return null
@@ -622,7 +876,7 @@ function HoverStat({
 }: {
   label: string
   value: string
-  breakdown: Array<{ name: string; doses: number; cost: number }>
+  breakdown: Array<{ id: string; name: string; doses: number; cost: number }>
 }) {
   return (
     <div className="group relative">
@@ -636,7 +890,7 @@ function HoverStat({
         ) : (
           <ul className="grid gap-1">
             {breakdown.map((row) => (
-              <li key={row.name} className="flex justify-between gap-2">
+              <li key={row.id} className="flex justify-between gap-2">
                 <span>{row.name}</span>
                 <strong>
                   {row.doses} dosis
@@ -704,6 +958,7 @@ function EntryModal({
         : '',
   )
   const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
   const selected = STOCK_UNITS.find((item) => item.value === unit)
   const needsSize = usesPackageSize(unit)
   const isNewEntry = !initial
@@ -741,7 +996,25 @@ function EntryModal({
       usdAmount: costCurrency === 'USD' ? Number(usdAmount) : undefined,
       usdRate: costCurrency === 'USD' ? Number(usdRate) : undefined,
     })
-    if (message) setError(message)
+    if (message) {
+      setSaved(false)
+      setError(message)
+      return
+    }
+    if (initial) return
+    setPicked('')
+    setName('')
+    setDate(todayIso())
+    setQuantity('')
+    setSize('')
+    setCost('')
+    setUsdAmount('')
+    if (costCurrency === 'USD') {
+      setUsdRate(usdRate || (lastUsdRate ? String(lastUsdRate) : ''))
+    }
+    setError(null)
+    setSaved(true)
+    afterSaveReadyForNext(e)
   }
 
   return (
@@ -883,6 +1156,7 @@ function EntryModal({
             medicamento.
           </p>
         )}
+        {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
         <button className="btn btn-primary" type="submit">
           {initial ? 'Guardar cambios' : prefill ? 'Reponer medicamento' : 'Añadir medicamento'}
@@ -895,6 +1169,7 @@ function EntryModal({
 function InjectionModal({
   title,
   knownMeds,
+  isEdit = false,
   initialName = '',
   initialLines,
   onClose,
@@ -902,6 +1177,7 @@ function InjectionModal({
 }: {
   title: string
   knownMeds: Array<{ name: string; unit: StockUnit }>
+  isEdit?: boolean
   initialName?: string
   initialLines?: InjectionLine[]
   onClose: () => void
@@ -917,11 +1193,22 @@ function InjectionModal({
     initialLines && initialLines.length > 0 ? initialLines : [emptyLine()],
   )
   const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
 
   function submit(e: FormEvent) {
     e.preventDefault()
     const message = onSave(name, lines)
-    if (message) setError(message)
+    if (message) {
+      setSaved(false)
+      setError(message)
+      return
+    }
+    if (isEdit) return
+    setName('')
+    setLines([emptyLine()])
+    setError(null)
+    setSaved(true)
+    afterSaveReadyForNext(e)
   }
 
   function setLine(index: number, patch: Partial<InjectionLine>) {
@@ -1010,6 +1297,7 @@ function InjectionModal({
         <button className="btn btn-ghost w-fit" type="button" onClick={() => setLines((rows) => [...rows, emptyLine()])}>
           Añadir otro medicamento
         </button>
+        {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
         <button className="btn btn-primary" type="submit">
           Guardar inyección
@@ -1019,26 +1307,187 @@ function InjectionModal({
   )
 }
 
+function collectAllocations(
+  placements: Array<{ locationId: string; locationName: string; doses: string }>,
+  locations: CepaLocation[],
+): InjectionUseAllocation[] {
+  return placements.flatMap((row) => {
+    const count = Number.parseInt(row.doses, 10) || 0
+    if (!row.locationId || count <= 0) return []
+    const found = locations.find((item) => item.id === row.locationId)
+    return [
+      {
+        locationId: row.locationId,
+        location: found?.name || row.locationName,
+        doses: count,
+      },
+    ]
+  })
+}
+
+function InjectionCageFields({
+  locations,
+  doses,
+  placements,
+  setPlacements,
+}: {
+  locations: CepaLocation[]
+  doses: number
+  placements: Array<{ key: string; locationId: string; locationName: string; doses: string }>
+  setPlacements: (
+    update:
+      | Array<{ key: string; locationId: string; locationName: string; doses: string }>
+      | ((
+          rows: Array<{ key: string; locationId: string; locationName: string; doses: string }>,
+        ) => Array<{ key: string; locationId: string; locationName: string; doses: string }>),
+  ) => void
+}) {
+  const placed = placements.reduce((sum, row) => sum + (Number.parseInt(row.doses, 10) || 0), 0)
+  return (
+    <div>
+      <span className="label">Jaula</span>
+      <p className="mb-2 text-xs text-[var(--muted)]">
+        Opcional. Si asignas, reparte las {doses} dosis entre una o varias jaulas. Las jaulas se crean
+        en{' '}
+        <Link className="font-semibold underline" to="/ajustes">
+          Ajustes
+        </Link>
+        .
+      </p>
+      <div className="grid gap-2">
+        {placements.map((row) => {
+          const inCatalog = locations.some((item) => item.id === row.locationId)
+          return (
+            <div
+              key={row.key}
+              className="grid gap-2 rounded-2xl border border-[var(--line)] p-3 sm:grid-cols-[1fr_7rem_auto]"
+            >
+              <label>
+                <span className="label">Jaula</span>
+                <select
+                  className="field"
+                  value={inCatalog || row.locationId ? row.locationId : ''}
+                  onChange={(e) => {
+                    const id = e.target.value
+                    const found = locations.find((item) => item.id === id)
+                    setPlacements((rows) =>
+                      rows.map((item) =>
+                        item.key === row.key
+                          ? {
+                              ...item,
+                              locationId: id,
+                              locationName: found?.name ?? (id === row.locationId ? row.locationName : ''),
+                            }
+                          : item,
+                      ),
+                    )
+                  }}
+                >
+                  <option value="">Sin asignar</option>
+                  {!inCatalog && row.locationId && (
+                    <option value={row.locationId}>{row.locationName}</option>
+                  )}
+                  {locations.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span className="label">Cantidad</span>
+                <input
+                  className="field"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={row.doses}
+                  onChange={(e) =>
+                    setPlacements((rows) =>
+                      rows.map((item) => (item.key === row.key ? { ...item, doses: e.target.value } : item)),
+                    )
+                  }
+                />
+              </label>
+              {placements.length > 1 ? (
+                <button
+                  className="btn btn-ghost self-end"
+                  type="button"
+                  onClick={() => setPlacements((rows) => rows.filter((item) => item.key !== row.key))}
+                >
+                  Quitar
+                </button>
+              ) : (
+                <span className="hidden sm:block" />
+              )}
+            </div>
+          )
+        })}
+      </div>
+      <button
+        className="btn btn-ghost mt-2"
+        type="button"
+        onClick={() =>
+          setPlacements((rows) => [...rows, { key: uid(), locationId: '', locationName: '', doses: '' }])
+        }
+      >
+        Añadir otra jaula
+      </button>
+      {placed > 0 && (
+        <p className={`mt-2 text-sm ${placed === doses ? 'text-[var(--muted)]' : 'text-[var(--danger)]'}`}>
+          Repartidas {placed} de {doses} dosis
+          {placed !== doses ? '. Deben coincidir para guardar la asignación.' : '.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function UseModal({
   injection,
   entries,
+  desteteLocations,
+  engordeLocations,
   onClose,
   onSave,
 }: {
   injection?: Injection
   entries: MedicationEntry[]
+  desteteLocations: CepaLocation[]
+  engordeLocations: CepaLocation[]
   onClose: () => void
-  onSave: (doses: number, date: string) => string | null
+  onSave: (
+    doses: number,
+    date: string,
+    stage: FarmStage,
+    allocations: InjectionUseAllocation[],
+  ) => string | null
 }) {
   const [doses, setDoses] = useState(1)
   const [date, setDate] = useState(todayIso())
+  const [stage, setStage] = useState<FarmStage>('destete')
+  const [placements, setPlacements] = useState(() => [
+    { key: uid(), locationId: '', locationName: '', doses: '' },
+  ])
   const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+  const locations = stage === 'engorde' ? engordeLocations : desteteLocations
   const preview = injection ? applyInjectionUse(entries, injection, doses) : { ok: false, cost: 0 }
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    const message = onSave(doses, date)
-    if (message) setError(message)
+    const message = onSave(doses, date, stage, collectAllocations(placements, locations))
+    if (message) {
+      setSaved(false)
+      setError(message)
+      return
+    }
+    setDoses(1)
+    setDate(todayIso())
+    setPlacements([{ key: uid(), locationId: '', locationName: '', doses: '' }])
+    setError(null)
+    setSaved(true)
+    afterSaveReadyForNext(e)
   }
 
   return (
@@ -1058,11 +1507,25 @@ function UseModal({
             onChange={(e) => setDoses(Number(e.target.value))}
           />
         </label>
+        <FarmStageFields
+          value={stage}
+          onChange={(next) => {
+            setStage(next)
+            setPlacements([{ key: uid(), locationId: '', locationName: '', doses: '' }])
+          }}
+        />
+        <InjectionCageFields
+          locations={locations}
+          doses={doses}
+          placements={placements}
+          setPlacements={setPlacements}
+        />
         <p className="text-sm text-[var(--muted)]">
           {preview.ok
             ? `Esta vez costará ${formatMoney(preview.cost)}`
             : 'No hay stock suficiente para calcular el costo'}
         </p>
+        {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
         <button className="btn btn-primary" type="submit">
           Descontar del inventario
@@ -1075,21 +1538,44 @@ function UseModal({
 function EditUseModal({
   initial,
   injectionName,
+  desteteLocations,
+  engordeLocations,
   onClose,
   onSave,
 }: {
   initial: InjectionUse
   injectionName: string
+  desteteLocations: CepaLocation[]
+  engordeLocations: CepaLocation[]
   onClose: () => void
-  onSave: (doses: number, date: string) => string | null
+  onSave: (
+    doses: number,
+    date: string,
+    stage: FarmStage,
+    allocations: InjectionUseAllocation[],
+  ) => string | null
 }) {
   const [doses, setDoses] = useState(initial.doses)
   const [date, setDate] = useState(initial.date)
+  const [stage, setStage] = useState<FarmStage>(injectionUseStage(initial))
+  const [placements, setPlacements] = useState(() => {
+    const allocations = initial.allocations ?? []
+    if (allocations.length > 0) {
+      return allocations.map((item) => ({
+        key: uid(),
+        locationId: item.locationId,
+        locationName: item.location,
+        doses: String(item.doses),
+      }))
+    }
+    return [{ key: uid(), locationId: '', locationName: '', doses: '' }]
+  })
   const [error, setError] = useState<string | null>(null)
+  const locations = stage === 'engorde' ? engordeLocations : desteteLocations
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    const message = onSave(doses, date)
+    const message = onSave(doses, date, stage, collectAllocations(placements, locations))
     if (message) setError(message)
   }
 
@@ -1111,6 +1597,19 @@ function EditUseModal({
             onChange={(e) => setDoses(Number(e.target.value))}
           />
         </label>
+        <FarmStageFields
+          value={stage}
+          onChange={(next) => {
+            setStage(next)
+            setPlacements([{ key: uid(), locationId: '', locationName: '', doses: '' }])
+          }}
+        />
+        <InjectionCageFields
+          locations={locations}
+          doses={doses}
+          placements={placements}
+          setPlacements={setPlacements}
+        />
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
         <button className="btn btn-primary" type="submit">
           Guardar cambios
@@ -1119,7 +1618,6 @@ function EditUseModal({
     </Modal>
   )
 }
-
 function ConfirmModal({
   title,
   message,
