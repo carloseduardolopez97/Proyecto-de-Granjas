@@ -1,32 +1,35 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { uid, usdToPesos, feedAvailableQq, latestFeedPrice, normalizeFeedStorage } from '../lib/calc'
+import { uid, usdToPesos, feedAvailableKg, feedKgFromSacks, formatKg, latestFeedPrice, normalizeFeedStorage, normalizeSackWeightKg } from '../lib/calc'
 import { loadFeed, saveFeed } from '../lib/storage'
 import type { FarmStage, FeedCurrency, FeedProduct, FeedPurchase, FeedState, FeedStorage, FeedUse, FeedUseAllocation } from '../lib/types'
 
 export type FeedMoneyInput = {
   priceCurrency: FeedCurrency
-  pricePerQq: number
+  pricePerKg: number
   usdAmount?: number
   usdRate?: number
 }
 
 export type FeedProductInput = FeedMoneyInput & {
   name: string
+  sackWeightKg?: number
 }
 
 export type FeedPurchaseInput = FeedMoneyInput & {
   feedId: string
   date: string
   invoiceNumber: string
-  quantityQq: number
+  quantityKg: number
   storage: FeedStorage
+  sackCount?: number
+  sackWeightKg?: number
 }
 
 export type FeedUseInput = {
   date: string
   stage: FarmStage
   feedId: string
-  quantityQq: number
+  quantityKg: number
   storage: FeedStorage
   allocations?: FeedUseAllocation[]
 }
@@ -46,7 +49,7 @@ type FeedContextValue = {
 
 const FeedContext = createContext<FeedContextValue | null>(null)
 
-function parseMoney(input: FeedMoneyInput): Omit<FeedMoneyInput, 'pricePerQq'> & { pricePerQq: number } | string {
+function parseMoney(input: FeedMoneyInput): Omit<FeedMoneyInput, 'pricePerKg'> & { pricePerKg: number } | string {
   const priceCurrency = input.priceCurrency ?? 'DOP'
   if (priceCurrency === 'USD') {
     if ((input.usdAmount ?? 0) < 0) return 'El costo en dólares no puede ser negativo.'
@@ -57,11 +60,11 @@ function parseMoney(input: FeedMoneyInput): Omit<FeedMoneyInput, 'pricePerQq'> &
       priceCurrency,
       usdAmount,
       usdRate,
-      pricePerQq: usdToPesos(usdAmount, usdRate),
+      pricePerKg: usdToPesos(usdAmount, usdRate),
     }
   }
-  if (!(input.pricePerQq >= 0)) return 'El precio no puede ser negativo.'
-  return { priceCurrency: 'DOP', pricePerQq: input.pricePerQq }
+  if (!(input.pricePerKg >= 0)) return 'El precio no puede ser negativo.'
+  return { priceCurrency: 'DOP', pricePerKg: input.pricePerKg }
 }
 
 function parseProduct(input: FeedProductInput, others: FeedProduct[], id?: string): FeedProduct | string {
@@ -73,7 +76,11 @@ function parseProduct(input: FeedProductInput, others: FeedProduct[], id?: strin
     (item) => item.id !== id && item.name.trim().toLowerCase() === name.toLowerCase(),
   )
   if (taken) return 'Ya existe un alimento con ese nombre.'
-  return { id: id ?? uid(), name, ...money }
+  const sackWeightKg = normalizeSackWeightKg(input.sackWeightKg)
+  if (input.sackWeightKg != null && input.sackWeightKg !== 0 && !sackWeightKg) {
+    return 'El peso del saco debe ser mayor a 0.'
+  }
+  return { id: id ?? uid(), name, ...money, sackWeightKg }
 }
 
 function parsePurchase(
@@ -86,7 +93,15 @@ function parsePurchase(
   if (!input.date) return 'Indica la fecha de entrada.'
   const invoiceNumber = input.invoiceNumber.trim()
   if (!invoiceNumber) return 'Indica el número de factura.'
-  if (!(input.quantityQq > 0)) return 'La cantidad debe ser mayor a 0.'
+  const sackWeightKg = normalizeSackWeightKg(input.sackWeightKg)
+  const sackCount = input.sackCount
+  let quantityKg = input.quantityKg
+  if (sackCount != null || sackWeightKg != null) {
+    if (!(sackCount && sackCount > 0)) return 'Indica cuántos sacos llegaron.'
+    if (!sackWeightKg) return 'Indica el peso de un saco.'
+    quantityKg = feedKgFromSacks(sackCount, sackWeightKg)
+  }
+  if (!(quantityKg > 0)) return 'La cantidad debe ser mayor a 0.'
   const money = parseMoney(input)
   if (typeof money === 'string') return money
   const feedName = previous && previous.feedId === product.id ? previous.feedName : product.name
@@ -97,9 +112,11 @@ function parsePurchase(
     feedName,
     date: input.date,
     invoiceNumber,
-    quantityQq: input.quantityQq,
+    quantityKg,
     storage,
     ...money,
+    sackCount: sackWeightKg && sackCount && sackCount > 0 ? sackCount : undefined,
+    sackWeightKg,
   }
 }
 
@@ -108,33 +125,38 @@ function parseUse(input: FeedUseInput, state: FeedState, previous?: FeedUse): Fe
   const storage = normalizeFeedStorage(input.storage)
   const priced = latestFeedPrice(input.feedId, state.purchases, state.products, input.date, storage)
   if (!priced) return 'Elige un alimento que ya esté en Ajustes.'
-  if (!(input.quantityQq > 0)) return 'La cantidad de alimento debe ser mayor a 0.'
-  const available = feedAvailableQq(state.purchases, state.uses ?? [], input.feedId, previous?.id, storage)
-  if (input.quantityQq - available > 0.0001) {
+  if (!(input.quantityKg > 0)) return 'La cantidad de alimento debe ser mayor a 0.'
+  const available = feedAvailableKg(state.purchases, state.uses ?? [], input.feedId, previous?.id, storage)
+  if (input.quantityKg - available > 0.0001) {
     const place = storage === 'silo' ? 'en silo' : 'en sacos'
-    return `Solo hay ${available} QQ disponibles ${place} de ese alimento.`
+    return `Solo hay ${formatKg(available)} kg disponibles ${place} de ese alimento.`
   }
-  const allocations = (input.allocations ?? []).filter((item) => item.locationId && item.quantityQq > 0)
-  const placed = allocations.reduce((sum, item) => sum + item.quantityQq, 0)
-  if (allocations.length > 0 && Math.abs(placed - input.quantityQq) > 0.02) {
-    return `Las jaulas deben sumar ${input.quantityQq} QQ.`
+  const allocations = (input.allocations ?? []).filter((item) => item.cepaId && item.quantityKg > 0)
+  if (allocations.length === 0) return 'Elige la cepa que se alimenta.'
+  const ids = allocations.map((item) => item.cepaId)
+  if (new Set(ids).size !== ids.length) {
+    return 'No repitas la misma cepa. Junta esas cantidades en una sola línea.'
+  }
+  const placed = allocations.reduce((sum, item) => sum + item.quantityKg, 0)
+  if (Math.abs(placed - input.quantityKg) > 0.5) {
+    return `Las cepas deben sumar ${formatKg(input.quantityKg)} kg.`
   }
   const feedName =
     previous && previous.feedId === input.feedId ? previous.feedName : priced.feedName
-  const pricePerQq =
+  const pricePerKg =
     previous && previous.feedId === input.feedId && previous.storage === storage
-      ? previous.pricePerQq
-      : priced.pricePerQq
+      ? previous.pricePerKg
+      : priced.pricePerKg
   return {
     id: previous?.id ?? uid(),
     date: input.date,
     stage: input.stage,
     feedId: input.feedId,
     feedName,
-    quantityQq: input.quantityQq,
+    quantityKg: input.quantityKg,
     storage,
-    pricePerQq,
-    cost: Number((input.quantityQq * pricePerQq).toFixed(4)),
+    pricePerKg,
+    cost: Number((input.quantityKg * pricePerKg).toFixed(4)),
     allocations,
   }
 }
@@ -157,6 +179,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       ...s,
       products: [parsed, ...s.products],
       lastUsdRate: rememberRate(s, parsed),
+      feedUnit: 'kg',
     }))
     return null
   }, [state.products])
@@ -169,6 +192,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       ...s,
       products: s.products.map((item) => (item.id === id ? parsed : item)),
       lastUsdRate: rememberRate(s, parsed),
+      feedUnit: 'kg',
     }))
     return null
   }, [state.products])
@@ -187,6 +211,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       ...s,
       purchases: [parsed, ...s.purchases],
       lastUsdRate: rememberRate(s, parsed),
+      feedUnit: 'kg',
     }))
     return null
   }, [state.products])
@@ -200,6 +225,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
       ...s,
       purchases: s.purchases.map((item) => (item.id === id ? parsed : item)),
       lastUsdRate: rememberRate(s, parsed),
+      feedUnit: 'kg',
     }))
     return null
   }, [state.products, state.purchases])
@@ -216,7 +242,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
     if (typeof parsed === 'string') return parsed
     setState((s) => {
       if ((s.uses ?? []).some((item) => item.id === parsed.id)) return s
-      return { ...s, uses: [parsed, ...(s.uses ?? [])] }
+      return { ...s, uses: [parsed, ...(s.uses ?? [])], feedUnit: 'kg' }
     })
     return null
   }, [state])
@@ -229,6 +255,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
     setState((s) => ({
       ...s,
       uses: (s.uses ?? []).map((item) => (item.id === id ? parsed : item)),
+      feedUnit: 'kg',
     }))
     return null
   }, [state])

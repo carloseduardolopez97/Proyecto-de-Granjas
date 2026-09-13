@@ -1,11 +1,12 @@
-import { useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import DeathForm from '../components/DeathForm'
 import FeedPriceFields, { pesosFromFields } from '../components/FeedPriceFields'
 import FeedUseForm, { FeedUseHistory } from '../components/FeedUseForm'
 import StageActionHistory from '../components/StageActionHistory'
 import { ClearFiltersButton, FilterField, HistoryFilterBar, inDateRange, uniqueSorted } from '../components/HistoryFilters'
 import Modal, { afterSaveReadyForNext, SavedNotice } from '../components/Modal'
-import { useCepa, type CepaDeathInput, type CepaInput, type CepaWeighingInput } from '../context/CepaContext'
+import { useCepa, type CepaInput, type CepaWeighingInput } from '../context/CepaContext'
 import { useFeed } from '../context/FeedContext'
 import { usePharmacy } from '../context/PharmacyContext'
 import {
@@ -28,7 +29,9 @@ import {
   locationLiveCount,
   resolveCepaWeighingMass,
   splitKgByHeads,
-  stageUsageCosts,
+  desteteCostGroups,
+  cepaCostSheets,
+  emptyCepaCostSheet,
   buildStageActions,
   todayIso,
   uid,
@@ -44,6 +47,7 @@ export default function CepaPage() {
     updateCepa,
     deleteCepa,
     addSupplier,
+    updateSupplier,
     addLocation,
     addWeighing,
     updateWeighing,
@@ -161,15 +165,19 @@ export default function CepaPage() {
     }
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
   }, [rows, deaths, locationCatalog, transfers])
-  const usage = useMemo(
+  const costLedger = useMemo(
     () =>
-      stageUsageCosts({
-        stage: 'destete',
-        locations: locationCatalog,
+      cepaCostSheets({
+        cepas: rows,
+        lots: state.engordeLots ?? [],
         feedUses: feed.state.uses ?? [],
         injectionUses: pharmacy.state.uses,
       }),
-    [locationCatalog, feed.state.uses, pharmacy.state.uses],
+    [rows, state.engordeLots, feed.state.uses, pharmacy.state.uses],
+  )
+  const sheetById = useMemo(
+    () => new Map(costLedger.sheets.map((item) => [item.cepaId, item])),
+    [costLedger.sheets],
   )
   const feedUseRows = useMemo(
     () =>
@@ -201,9 +209,10 @@ export default function CepaPage() {
           <h2 className="font-display text-4xl">Cepa</h2>
           <p className="mt-2 max-w-2xl text-[var(--muted)]">
             Registra cada entrada de lechones de destete: suplidor, ubicación, fecha, cantidad, peso
-            total y el costo (por lechón o por kilo). Eliges una o varias jaulas al registrar. Anota la
-            edad de los lechones al comprar (cada suplidor puede vender a una edad distinta). Cuando
-            pasen a engorde, usa{' '}
+            total y el costo de compra (por lechón o por kilo). El alimento y la farmacia se cargan a esa
+            misma cepa, y el costo acumulado sigue al lote cuando pasa a engorde. Eliges una o varias jaulas
+            al registrar. Anota la edad de los lechones al comprar (cada suplidor puede vender a una edad
+            distinta). Cuando pasen a engorde, usa{' '}
             <Link className="font-semibold underline" to="/engorde">
               Engorde
             </Link>
@@ -303,7 +312,7 @@ export default function CepaPage() {
         />
         <Stat label="Peso total" value={`${formatKg(allTotals.kg)} kg`} />
         <HoverStat
-          label="Costo"
+          label="Costo de compra"
           value={formatDop(allTotals.cost)}
           empty="Aún no hay costos registrados."
           align="right"
@@ -318,27 +327,41 @@ export default function CepaPage() {
       <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <HoverStat
           label="Alimento usado"
-          value={formatDop(usage.totals.feedCost)}
+          value={formatDop(costLedger.sheets.reduce((sum, row) => sum + row.feedCost, 0) + costLedger.unassigned.feedCost)}
           empty="Aún no hay alimento asignado."
-          breakdown={usage.rows
-            .filter((row) => row.feedCost > 0)
-            .map((row) => ({ key: `feed-${row.key}`, name: row.name, value: formatDop(row.feedCost) }))}
+          breakdown={[
+            ...costLedger.sheets
+              .filter((row) => row.feedCost > 0)
+              .map((row) => ({ key: `feed-${row.cepaId}`, name: row.label, value: formatDop(row.feedCost) })),
+            ...(costLedger.unassigned.feedCost > 0
+              ? [{ key: 'feed-none', name: 'Sin cepa', value: formatDop(costLedger.unassigned.feedCost) }]
+              : []),
+          ]}
         />
         <HoverStat
           label="Farmacia usada"
-          value={formatDop(usage.totals.pharmacyCost)}
+          value={formatDop(
+            costLedger.sheets.reduce((sum, row) => sum + row.pharmacyCost, 0) + costLedger.unassigned.pharmacyCost,
+          )}
           empty="Aún no hay inyecciones asignadas."
-          breakdown={usage.rows
-            .filter((row) => row.pharmacyCost > 0)
-            .map((row) => ({ key: `pharm-${row.key}`, name: row.name, value: formatDop(row.pharmacyCost) }))}
+          breakdown={[
+            ...costLedger.sheets
+              .filter((row) => row.pharmacyCost > 0)
+              .map((row) => ({ key: `pharm-${row.cepaId}`, name: row.label, value: formatDop(row.pharmacyCost) })),
+            ...(costLedger.unassigned.pharmacyCost > 0
+              ? [{ key: 'pharm-none', name: 'Sin cepa', value: formatDop(costLedger.unassigned.pharmacyCost) }]
+              : []),
+          ]}
         />
         <HoverStat
-          label="Costo usado"
-          value={formatDop(usage.totals.total)}
-          empty="Aún no hay costos de uso."
-          breakdown={usage.rows
-            .filter((row) => row.total > 0)
-            .map((row) => ({ key: `use-${row.key}`, name: row.name, value: formatDop(row.total) }))}
+          label="Costo acumulado"
+          value={formatDop(costLedger.sheets.reduce((sum, row) => sum + row.total, 0))}
+          empty="Aún no hay costos de lote."
+          breakdown={costLedger.sheets.map((row) => ({
+            key: `acc-${row.cepaId}`,
+            name: row.label,
+            value: formatDop(row.total),
+          }))}
         />
       </div>
 
@@ -393,11 +416,24 @@ export default function CepaPage() {
                 </p>
                 <p className="mt-1 font-display text-xl">{formatDop(row.cost)}</p>
                 {(() => {
-                  const used = usage.rows.find((item) => item.key === row.id)
-                  return used && used.total > 0 ? (
+                  const inLoc = rows.filter((item) => item.locationId === row.id)
+                  const used = inLoc.reduce(
+                    (acc, item) => {
+                      const sheet = sheetById.get(item.id)
+                      return {
+                        feed: acc.feed + (sheet?.desteteFeedCost ?? 0),
+                        pharmacy: acc.pharmacy + (sheet?.destetePharmacyCost ?? 0),
+                        total: acc.total + (sheet?.total ?? 0),
+                      }
+                    },
+                    { feed: 0, pharmacy: 0, total: 0 },
+                  )
+                  return used.total > row.cost || used.feed + used.pharmacy > 0 ? (
                     <p className="mt-1 text-xs text-[var(--muted)]">
-                      Usado {formatDop(used.total)} · alimento {formatDop(used.feedCost)} · farmacia{' '}
-                      {formatDop(used.pharmacyCost)}
+                      Acumulado {formatDop(used.total)}
+                      {used.feed + used.pharmacy > 0
+                        ? ` · alimento ${formatDop(used.feed)} · farmacia ${formatDop(used.pharmacy)}`
+                        : ''}
                     </p>
                   ) : null
                 })()}
@@ -493,7 +529,8 @@ export default function CepaPage() {
                     <th className="pb-2 font-semibold">Prom. / lechón</th>
                     <th className="pb-2 font-semibold">Ganancia / lechón</th>
                     <th className="pb-2 font-semibold">Costo</th>
-                    <th className="pb-2 font-semibold">Total</th>
+                    <th className="pb-2 font-semibold">Compra</th>
+                    <th className="pb-2 font-semibold">Acumulado</th>
                     <th className="pb-2 font-semibold" />
                   </tr>
                 </thead>
@@ -504,6 +541,7 @@ export default function CepaPage() {
                     const dead = cepaDeathsUpTo(deaths, row.id)
                     const moved = cepaCountUpTo(transfers, row.id)
                     const total = cepaTotalCost(row)
+                    const sheet = sheetById.get(row.id) ?? emptyCepaCostSheet(row.id)
                     const gainKg = current.avgWeightKg - cepaAvgWeightKg(row.totalWeightKg, row.pigletCount)
                     const liveKg = current.avgWeightKg * live
                     return (
@@ -539,6 +577,14 @@ export default function CepaPage() {
                           ) : null}
                         </td>
                         <td className="py-3">{formatDop(total)}</td>
+                        <td className="py-3">
+                          {formatDop(sheet.total)}
+                          {sheet.usedCost > 0 ? (
+                            <span className="mt-0.5 block text-xs text-[var(--muted)]">
+                              usos {formatDop(sheet.usedCost)}
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="py-3">
                           <div className="flex justify-end gap-1">
                             <IconButton
@@ -599,6 +645,14 @@ export default function CepaPage() {
                     <td className="py-3" />
                     <td className="py-3" />
                     <td className="py-3 font-semibold">{formatDop(totals.cost)}</td>
+                    <td className="py-3 font-semibold">
+                      {formatDop(
+                        visibleRows.reduce(
+                          (sum, row) => sum + (sheetById.get(row.id)?.total ?? cepaTotalCost(row)),
+                          0,
+                        ),
+                      )}
+                    </td>
                     <td className="py-3" />
                   </tr>
                 </tfoot>
@@ -623,6 +677,7 @@ export default function CepaPage() {
             setEditing(null)
           }}
           onAddSupplier={addSupplier}
+          onUpdateSupplier={updateSupplier}
           onAddLocation={addLocation}
           onSave={(inputs) => {
             if (editing) {
@@ -663,6 +718,7 @@ export default function CepaPage() {
       {deathOpen && (
         <DeathForm
           key={`${editingDeath?.id ?? 'new'}:${deathCepa?.id ?? 'none'}`}
+          stage="destete"
           cepas={state.cepas}
           deaths={deaths}
           transfers={transfers}
@@ -687,7 +743,7 @@ export default function CepaPage() {
         <FeedUseForm
           title={editingFeedUse ? 'Editar alimentación' : 'Alimentar destete'}
           stage="destete"
-          locations={locationCatalog}
+          groups={desteteCostGroups(state.cepas)}
           initial={editingFeedUse}
           onClose={() => {
             setFeedOpen(false)
@@ -700,7 +756,7 @@ export default function CepaPage() {
         <Modal title="Eliminar alimentación" onClose={() => setRemovingFeedUse(null)}>
           <p className="text-[var(--muted)]">
             ¿Quitar {removingFeedUse.feedName} del {removingFeedUse.date}? El inventario de alimento vuelve a
-            contar esos QQ.
+            contar esos kilos.
           </p>
           <div className="mt-4 flex flex-wrap justify-end gap-2">
             <button className="btn btn-ghost" type="button" onClick={() => setRemovingFeedUse(null)}>
@@ -758,6 +814,7 @@ function CepaForm({
   initial,
   onClose,
   onAddSupplier,
+  onUpdateSupplier,
   onAddLocation,
   onSave,
 }: {
@@ -771,6 +828,7 @@ function CepaForm({
   initial: Cepa | null
   onClose: () => void
   onAddSupplier: (name: string, saleAgeDays?: number) => { error: string } | { id: string }
+  onUpdateSupplier: (id: string, name: string, saleAgeDays?: number) => string | null
   onAddLocation: (name: string, capacity?: number) => { error: string } | { id: string }
   onSave: (inputs: CepaInput[]) => string | null
 }) {
@@ -790,6 +848,9 @@ function CepaForm({
   const [newLocationCapacity, setNewLocationCapacity] = useState('')
   const [locationError, setLocationError] = useState<string | null>(null)
   const selectedSupplier = suppliers.find((item) => item.id === supplierId)
+  const [usualAge, setUsualAge] = useState(
+    selectedSupplier?.saleAgeDays ? String(selectedSupplier.saleAgeDays) : '',
+  )
   const [arrivalAge, setArrivalAge] = useState(
     initial?.arrivalAgeDays
       ? String(initial.arrivalAgeDays)
@@ -815,6 +876,27 @@ function CepaForm({
   )
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    const next = suppliers.find((item) => item.id === supplierId)
+    setUsualAge(next?.saleAgeDays ? String(next.saleAgeDays) : '')
+  }, [supplierId, suppliers])
+
+  function persistUsualAge(): string | null {
+    if (!selectedSupplier) return null
+    const ageValue = usualAge.trim() ? Number.parseInt(usualAge, 10) : undefined
+    const current = selectedSupplier.saleAgeDays
+    if (ageValue === current || (ageValue == null && current == null)) return null
+    return onUpdateSupplier(selectedSupplier.id, selectedSupplier.name, ageValue)
+  }
+
+  function changeUsualAge(value: string) {
+    const previousUsual = selectedSupplier?.saleAgeDays
+    setUsualAge(value)
+    if (!arrivalAge || (previousUsual != null && arrivalAge === String(previousUsual))) {
+      setArrivalAge(value)
+    }
+  }
 
   const counts = placements.map((row) => Number.parseInt(row.pigletCount, 10) || 0)
   const count = counts.reduce((sum, value) => sum + value, 0)
@@ -874,6 +956,13 @@ function CepaForm({
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    const usualError = persistUsualAge()
+    if (usualError) {
+      setSaved(false)
+      setSupplierError(usualError)
+      setError(usualError)
+      return
+    }
     const filled = placements.filter((row) => row.locationId && (Number.parseInt(row.pigletCount, 10) || 0) > 0)
     if (filled.length === 0) {
       setSaved(false)
@@ -944,16 +1033,48 @@ function CepaForm({
                 setSupplierId(nextId)
                 const next = suppliers.find((item) => item.id === nextId)
                 if (next?.saleAgeDays) setArrivalAge(String(next.saleAgeDays))
+                else if (!initial) setArrivalAge('')
+                setUsualAge(next?.saleAgeDays ? String(next.saleAgeDays) : '')
               }}
               required={!addingSupplier}
             >
               {suppliers.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name}
+                  {item.saleAgeDays ? ` · ${item.saleAgeDays} días` : ''}
                 </option>
               ))}
             </select>
           )}
+          {!addingSupplier && selectedSupplier ? (
+            <label className="mt-2 block">
+              <span className="label">Edad habitual de venta (días)</span>
+              <input
+                className="field"
+                type="number"
+                min={1}
+                step={1}
+                value={usualAge}
+                onChange={(e) => changeUsualAge(e.target.value)}
+                onBlur={() => {
+                  const message = persistUsualAge()
+                  if (message) setSupplierError(message)
+                  else setSupplierError(null)
+                }}
+                placeholder="Ej. 21"
+              />
+              <span className="mt-1 block text-xs text-[var(--muted)]">
+                Edad usual de este suplidor. Cámbiala si ahora vende a otra edad. No modifica cepas ya
+                registradas.
+                {usualAge && Number.parseInt(usualAge, 10) > 0
+                  ? ` ${formatAgeDays(Number.parseInt(usualAge, 10))}.`
+                  : ''}
+              </span>
+            </label>
+          ) : null}
+          {!addingSupplier && supplierError ? (
+            <p className="mt-2 text-sm text-[var(--danger)]">{supplierError}</p>
+          ) : null}
           {addingSupplier ? (
             <div className="mt-2 grid gap-2 rounded-2xl border border-[var(--line)] p-3">
               <label>
@@ -976,6 +1097,9 @@ function CepaForm({
                   onChange={(e) => setNewSupplierAge(e.target.value)}
                   placeholder="Ej. 21"
                 />
+                <span className="mt-1 block text-xs text-[var(--muted)]">
+                  Luego puedes cambiarla en el suplidor si una compra llega a otra edad.
+                </span>
               </label>
               {supplierError && <p className="text-sm text-[var(--danger)]">{supplierError}</p>}
               <div className="flex flex-wrap gap-2">
@@ -1168,7 +1292,8 @@ function CepaForm({
             required
           />
           <span className="mt-1 block text-xs text-[var(--muted)]">
-            Edad de estos lechones al llegar. Si el suplidor vende a otra edad, cámbiala aquí.
+            Edad de estos lechones en esta compra. Si esta entrada llega a otra edad, cámbiala aquí sin
+            tocar la edad habitual del suplidor.
             {arrivalAge && Number.parseInt(arrivalAge, 10) > 0
               ? ` ${formatAgeDays(Number.parseInt(arrivalAge, 10))}.`
               : ''}
@@ -1506,170 +1631,6 @@ function WeightForm({
                     <PencilIcon />
                   </IconButton>
                   <IconButton label="Eliminar" onClick={() => onDeleteWeighing(item.id)}>
-                    <TrashIcon />
-                  </IconButton>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </Modal>
-  )
-}
-
-function DeathForm({
-  cepas,
-  deaths,
-  transfers,
-  initialCepa,
-  initialDeath,
-  onClose,
-  onSave,
-  onEditDeath,
-  onDeleteDeath,
-}: {
-  cepas: Cepa[]
-  deaths: CepaDeath[]
-  transfers: HeadMovement[]
-  initialCepa: Cepa | null
-  initialDeath: CepaDeath | null
-  onClose: () => void
-  onSave: (input: CepaDeathInput) => string | null
-  onEditDeath: (item: CepaDeath) => void
-  onDeleteDeath: (id: string) => void
-}) {
-  const orderedCepas = [...cepas].sort(
-    (a, b) => b.date.localeCompare(a.date) || a.location.localeCompare(b.location, 'es'),
-  )
-  const [cepaId, setCepaId] = useState(initialDeath?.cepaId ?? initialCepa?.id ?? orderedCepas[0]?.id ?? '')
-  const cepa = cepas.find((item) => item.id === cepaId) ?? null
-  const [date, setDate] = useState(initialDeath?.date ?? todayIso())
-  const live = cepa ? cepaLiveOnDate(cepa, deaths, date, initialDeath?.id, transfers) : 0
-  const [count, setCount] = useState(initialDeath ? String(initialDeath.count) : '')
-  const [note, setNote] = useState(initialDeath?.note ?? '')
-  const [error, setError] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
-  const qty = Number.parseInt(count, 10) || 0
-  const age = cepa && date ? cepaAgeOnDate(cepa, date) : null
-
-  function submit(e: FormEvent) {
-    e.preventDefault()
-    const message = onSave({
-      cepaId,
-      date,
-      count: qty,
-      note,
-    })
-    if (message) {
-      setSaved(false)
-      setError(message)
-      return
-    }
-    if (initialDeath) {
-      onClose()
-      return
-    }
-    setCount('')
-    setNote('')
-    setDate(todayIso())
-    setError(null)
-    setSaved(true)
-    afterSaveReadyForNext(e)
-  }
-
-  const history = deaths
-    .filter((item) => item.cepaId === cepaId)
-    .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id))
-
-  return (
-    <Modal title={initialDeath ? 'Editar muerte' : 'Registrar muerte'} onClose={onClose}>
-      <form className="grid gap-3" onSubmit={submit}>
-        <label>
-          <span className="label">Cepa</span>
-          <select className="field" value={cepaId} onChange={(e) => setCepaId(e.target.value)} required>
-            {orderedCepas.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.location} · {item.supplierName} · {item.date}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="label">Fecha</span>
-          <input
-            className="field"
-            type="date"
-            min={cepa?.date}
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            required
-          />
-        </label>
-        <label>
-          <span className="label">Lechones muertos</span>
-          <input
-            className="field"
-            type="number"
-            min={1}
-            max={live || undefined}
-            step={1}
-            value={count}
-            onChange={(e) => setCount(e.target.value)}
-            required
-          />
-          <span className="mt-1 block text-xs text-[var(--muted)]">
-            Quedan {live} vivos ese día
-            {cepa ? ` de ${cepa.pigletCount} comprados` : ''}.
-          </span>
-        </label>
-        {age && (
-          <p className="text-sm text-[var(--muted)]">
-            Edad al morir: {age.arrivalAgeDays > 0 ? formatAgeDays(age.ageDays) : `${age.daysOnFarm} días en granja`}
-            {age.arrivalAgeDays > 0 ? ` · ${age.daysOnFarm} días desde la compra` : ' (pon la edad de compra en la cepa)'}
-          </p>
-        )}
-        <label>
-          <span className="label">Nota (opcional)</span>
-          <input
-            className="field"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="Causa, si la sabes"
-          />
-        </label>
-        {saved && <SavedNotice />}
-        {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
-        <button className="btn btn-primary" type="submit" disabled={live <= 0 && !initialDeath}>
-          {initialDeath ? 'Guardar cambios' : 'Registrar muerte'}
-        </button>
-      </form>
-      {history.length > 0 && (
-        <div className="mt-5">
-          <h4 className="font-display text-xl">Muertes guardadas</h4>
-          <p className="mt-1 text-xs text-[var(--muted)]">
-            Cada registro baja el inventario y guarda la edad para la mortalidad en Reportes.
-          </p>
-          <ul className="mt-3 grid gap-2">
-            {history.map((item) => (
-              <li
-                key={item.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-[var(--line)] px-3 py-2 text-sm"
-              >
-                <div>
-                  <p className="font-semibold">
-                    {item.date} · {item.count} {item.count === 1 ? 'lechón' : 'lechones'}
-                  </p>
-                  <p className="text-[var(--muted)]">
-                    Edad {formatAgeDays(item.ageDays)}
-                    {item.note ? ` · ${item.note}` : ''}
-                  </p>
-                </div>
-                <div className="flex gap-1">
-                  <IconButton label="Editar" onClick={() => onEditDeath(item)}>
-                    <PencilIcon />
-                  </IconButton>
-                  <IconButton label="Eliminar" onClick={() => onDeleteDeath(item.id)}>
                     <TrashIcon />
                   </IconButton>
                 </div>

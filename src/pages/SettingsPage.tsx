@@ -1,10 +1,11 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import FeedPriceFields from '../components/FeedPriceFields'
+import FeedQtyModeFields from '../components/FeedQtyModeFields'
 import Modal, { afterSaveReadyForNext, SavedNotice } from '../components/Modal'
 import { useCepa } from '../context/CepaContext'
 import { useFeed, type FeedProductInput } from '../context/FeedContext'
-import { formatDopUnit, formatUsd } from '../lib/calc'
-import type { CepaLocation, FeedCurrency, FeedProduct } from '../lib/types'
+import { convertDisplayedFeedPrice, formatAgeDays, formatDopUnit, formatKg, formatUsd, kgPriceToPerSack, sackPriceToPerKg } from '../lib/calc'
+import type { CepaLocation, CepaSupplier, FeedCurrency, FeedProduct, FeedQtyMode } from '../lib/types'
 import { useQuickAdd } from '../lib/quickAdd'
 
 export default function SettingsPage() {
@@ -14,6 +15,9 @@ export default function SettingsPage() {
     addLocation,
     updateLocation,
     deleteLocation,
+    addSupplier,
+    updateSupplier,
+    deleteSupplier,
     addEngordeLocation,
     updateEngordeLocation,
     deleteEngordeLocation,
@@ -29,8 +33,13 @@ export default function SettingsPage() {
   const [editingEngorde, setEditingEngorde] = useState<CepaLocation | null>(null)
   const [removingEngorde, setRemovingEngorde] = useState<CepaLocation | null>(null)
   const [engordeError, setEngordeError] = useState<string | null>(null)
+  const [supplierFormOpen, setSupplierFormOpen] = useState(false)
+  const [editingSupplier, setEditingSupplier] = useState<CepaSupplier | null>(null)
+  const [removingSupplier, setRemovingSupplier] = useState<CepaSupplier | null>(null)
+  const [supplierError, setSupplierError] = useState<string | null>(null)
   const locations = cepaState.locations ?? []
   const engordeLocations = cepaState.engordeLocations ?? []
+  const suppliers = cepaState.suppliers ?? []
 
   useQuickAdd({
     catalogo: () => {
@@ -45,6 +54,10 @@ export default function SettingsPage() {
       setEditingEngorde(null)
       setEngordeFormOpen(true)
     },
+    suplidor: () => {
+      setEditingSupplier(null)
+      setSupplierFormOpen(true)
+    },
   })
 
   return (
@@ -54,12 +67,22 @@ export default function SettingsPage() {
           <p className="chip mb-3">Configuración</p>
           <h2 className="font-display text-4xl">Ajustes</h2>
           <p className="mt-2 max-w-2xl text-[var(--muted)]">
-            Prepara aquí el catálogo: alimentos, jaulas de destete y salas de engorde. Así el registro
-            solo elige lo que ya está creado. Si luego cambias el precio de un alimento, las compras ya
+            Prepara aquí el catálogo: suplidores, alimentos, jaulas de destete y salas de engorde. Así el
+            registro solo elige lo que ya está creado. Si luego cambias el precio de un alimento, las compras ya
             registradas no se modifican.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <button
+            className="btn btn-ghost"
+            type="button"
+            onClick={() => {
+              setEditingSupplier(null)
+              setSupplierFormOpen(true)
+            }}
+          >
+            Crear suplidor
+          </button>
           <button
             className="btn btn-ghost"
             type="button"
@@ -94,6 +117,73 @@ export default function SettingsPage() {
       </div>
 
       <div className="surface rounded-3xl p-5">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h3 className="font-display text-2xl">Suplidores</h3>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              Quién vende los lechones de destete y a qué edad suele vender. Esa edad se puede cambiar al
+              registrar una cepa si esa compra llega distinta.
+            </p>
+          </div>
+          <button
+            className="btn btn-primary"
+            type="button"
+            onClick={() => {
+              setEditingSupplier(null)
+              setSupplierFormOpen(true)
+            }}
+          >
+            Crear suplidor
+          </button>
+        </div>
+        {suppliers.length === 0 ? (
+          <p className="mt-3 text-[var(--muted)]">Todavía no hay suplidores. Crea el primero o añádelo al registrar una cepa.</p>
+        ) : (
+          <ul className="mt-4 grid gap-2">
+            {suppliers.map((item) => {
+              const used = cepaState.cepas.filter((row) => row.supplierId === item.id).length
+              return (
+                <li
+                  key={item.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-[var(--line)] bg-[var(--bg)] px-4 py-3"
+                >
+                  <div>
+                    <p className="font-semibold">{item.name}</p>
+                    <p className="text-sm text-[var(--muted)]">
+                      {item.saleAgeDays
+                        ? `Edad habitual ${formatAgeDays(item.saleAgeDays)} · `
+                        : 'Sin edad habitual · '}
+                      {used === 0 ? 'Sin cepas aún' : `${used} ${used === 1 ? 'cepa' : 'cepas'}`}
+                    </p>
+                  </div>
+                  <div className="flex gap-1">
+                    <IconButton
+                      label="Editar"
+                      onClick={() => {
+                        setEditingSupplier(item)
+                        setSupplierFormOpen(true)
+                      }}
+                    >
+                      <PencilIcon />
+                    </IconButton>
+                    <IconButton
+                      label="Eliminar"
+                      onClick={() => {
+                        setSupplierError(null)
+                        setRemovingSupplier(item)
+                      }}
+                    >
+                      <TrashIcon />
+                    </IconButton>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-8 surface rounded-3xl p-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h3 className="font-display text-2xl">Ubicaciones de destete</h3>
@@ -162,8 +252,8 @@ export default function SettingsPage() {
           <div>
             <h3 className="font-display text-2xl">Salas de engorde</h3>
             <p className="mt-1 text-sm text-[var(--muted)]">
-              Opcional: habitaciones aparte de las jaulas de destete. El traslado ya puede usar las jaulas
-              que creaste para Cepa.
+              Habitaciones de engorde. El traslado sale de una jaula de destete y entra a una de estas
+              salas. Créalas aquí antes de trasladar; el traslado no añade salas nuevas.
             </p>
           </div>
           <button
@@ -179,8 +269,8 @@ export default function SettingsPage() {
         </div>
         {engordeLocations.length === 0 ? (
           <p className="mt-3 text-[var(--muted)]">
-            No hay habitaciones extra. El traslado usa las jaulas de destete. Añade una aquí solo si
-            engorde tiene salas aparte.
+            No hay salas de engorde. Créalas aquí para poder trasladar. El traslado no usa las jaulas
+            de destete ni crea habitaciones nuevas.
           </p>
         ) : (
           <ul className="mt-4 grid gap-2">
@@ -230,7 +320,8 @@ export default function SettingsPage() {
           <div>
             <h3 className="font-display text-2xl">Alimentos</h3>
             <p className="mt-1 text-sm text-[var(--muted)]">
-              Catálogo con nombre y precio por QQ. Ese precio se usa al registrar compras.
+              Catálogo con nombre y precio. Puedes registrar por kilo o por saco (con el peso del saco). El uso al
+              alimentar se descuenta en kilos.
             </p>
           </div>
           <button
@@ -256,7 +347,10 @@ export default function SettingsPage() {
                 <div>
                   <p className="font-semibold">{product.name}</p>
                   <p className="text-sm text-[var(--muted)]">
-                    {formatDopUnit(product.pricePerQq)} por QQ
+                    {formatDopUnit(product.pricePerKg)} por kg
+                    {product.sackWeightKg
+                      ? ` · saco de ${formatKg(product.sackWeightKg)} kg`
+                      : ''}
                     {product.priceCurrency === 'USD' && product.usdAmount != null
                       ? ` · ${formatUsd(product.usdAmount)}`
                       : ''}
@@ -310,6 +404,48 @@ export default function SettingsPage() {
               onClick={() => {
                 deleteProduct(removing.id)
                 setRemoving(null)
+              }}
+            >
+              Eliminar
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {supplierFormOpen && (
+        <SupplierForm
+          title={editingSupplier ? 'Editar suplidor' : 'Crear suplidor'}
+          initial={editingSupplier}
+          onClose={() => {
+            setSupplierFormOpen(false)
+            setEditingSupplier(null)
+          }}
+          onSave={(name, saleAgeDays) => {
+            if (editingSupplier) return updateSupplier(editingSupplier.id, name, saleAgeDays)
+            const result = addSupplier(name, saleAgeDays)
+            return 'error' in result ? result.error : null
+          }}
+        />
+      )}
+
+      {removingSupplier && (
+        <Modal title="Eliminar suplidor" onClose={() => setRemovingSupplier(null)}>
+          <p className="text-[var(--muted)]">¿Eliminar “{removingSupplier.name}”?</p>
+          {supplierError && <p className="mt-2 text-sm text-[var(--danger)]">{supplierError}</p>}
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
+            <button className="btn btn-ghost" type="button" onClick={() => setRemovingSupplier(null)}>
+              Cancelar
+            </button>
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={() => {
+                const message = deleteSupplier(removingSupplier.id)
+                if (message) {
+                  setSupplierError(message)
+                  return
+                }
+                setRemovingSupplier(null)
               }}
             >
               Eliminar
@@ -426,14 +562,23 @@ function FeedProductForm({
   onClose: () => void
   onSave: (input: FeedProductInput) => string | null
 }) {
+  const sackMode = Boolean(initial?.sackWeightKg)
   const [name, setName] = useState(initial?.name ?? '')
+  const [qtyMode, setQtyMode] = useState<FeedQtyMode>(sackMode ? 'saco' : 'kg')
+  const [sackWeight, setSackWeight] = useState(initial?.sackWeightKg ? String(initial.sackWeightKg) : '')
   const [currency, setCurrency] = useState<FeedCurrency>(initial?.priceCurrency ?? 'DOP')
-  const [price, setPrice] = useState(
-    initial && initial.priceCurrency !== 'USD' ? String(initial.pricePerQq) : '',
-  )
-  const [usdAmount, setUsdAmount] = useState(
-    initial?.priceCurrency === 'USD' && initial.usdAmount != null ? String(initial.usdAmount) : '',
-  )
+  const [price, setPrice] = useState(() => {
+    if (!initial || initial.priceCurrency === 'USD') return ''
+    return sackMode && initial.sackWeightKg
+      ? String(kgPriceToPerSack(initial.pricePerKg, initial.sackWeightKg))
+      : String(initial.pricePerKg)
+  })
+  const [usdAmount, setUsdAmount] = useState(() => {
+    if (initial?.priceCurrency !== 'USD' || initial.usdAmount == null) return ''
+    return sackMode && initial.sackWeightKg
+      ? String(kgPriceToPerSack(initial.usdAmount, initial.sackWeightKg))
+      : String(initial.usdAmount)
+  })
   const [usdRate, setUsdRate] = useState(
     initial?.priceCurrency === 'USD' && initial.usdRate
       ? String(initial.usdRate)
@@ -443,15 +588,32 @@ function FeedProductForm({
   )
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const weight = Number(sackWeight) || 0
+  const priceUnit = qtyMode === 'saco' ? 'saco' : 'kg'
+
+  function changeMode(next: FeedQtyMode) {
+    const converted = convertDisplayedFeedPrice({ price, usdAmount }, qtyMode, next, weight)
+    setPrice(converted.price)
+    setUsdAmount(converted.usdAmount)
+    setQtyMode(next)
+  }
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    const bySack = qtyMode === 'saco'
+    const sackWeightKg = bySack ? weight : undefined
     const message = onSave({
       name,
       priceCurrency: currency,
-      pricePerQq: Number(price),
-      usdAmount: currency === 'USD' ? Number(usdAmount) : undefined,
+      pricePerKg: bySack ? sackPriceToPerKg(Number(price), weight) : Number(price),
+      usdAmount:
+        currency === 'USD'
+          ? bySack
+            ? sackPriceToPerKg(Number(usdAmount), weight)
+            : Number(usdAmount)
+          : undefined,
       usdRate: currency === 'USD' ? Number(usdRate) : undefined,
+      sackWeightKg,
     })
     if (message) {
       setSaved(false)
@@ -478,6 +640,7 @@ function FeedProductForm({
           <span className="label">Nombre</span>
           <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Engorde 1" required />
         </label>
+        <FeedQtyModeFields mode={qtyMode} onMode={changeMode} sackWeight={sackWeight} onSackWeight={setSackWeight} />
         <FeedPriceFields
           currency={currency}
           onCurrency={setCurrency}
@@ -487,12 +650,85 @@ function FeedProductForm({
           onUsdAmount={setUsdAmount}
           usdRate={usdRate}
           onUsdRate={setUsdRate}
-          hint="Este precio se usa al registrar una compra nueva. No cambia facturas anteriores."
+          priceUnit={priceUnit}
+          hint="Este precio se usa al registrar una compra nueva. No cambia facturas anteriores. Al alimentar se descuenta en kilos."
         />
         {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
         <button className="btn btn-primary" type="submit">
           {initial ? 'Guardar cambios' : 'Crear alimento'}
+        </button>
+      </form>
+    </Modal>
+  )
+}
+
+function SupplierForm({
+  title,
+  initial,
+  onClose,
+  onSave,
+}: {
+  title: string
+  initial: CepaSupplier | null
+  onClose: () => void
+  onSave: (name: string, saleAgeDays?: number) => string | null
+}) {
+  const [name, setName] = useState(initial?.name ?? '')
+  const [saleAge, setSaleAge] = useState(initial?.saleAgeDays ? String(initial.saleAgeDays) : '')
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  function submit(e: FormEvent) {
+    e.preventDefault()
+    const parsed = saleAge.trim() ? Number.parseInt(saleAge, 10) : undefined
+    const message = onSave(name, parsed)
+    if (message) {
+      setSaved(false)
+      setError(message)
+      return
+    }
+    if (initial) {
+      onClose()
+      return
+    }
+    setName('')
+    setSaleAge('')
+    setError(null)
+    setSaved(true)
+    afterSaveReadyForNext(e)
+  }
+
+  return (
+    <Modal title={title} onClose={onClose}>
+      <form className="grid gap-3" onSubmit={submit}>
+        <label>
+          <span className="label">Nombre</span>
+          <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ej. Granja El Valle" required />
+        </label>
+        <label>
+          <span className="label">Edad habitual de venta (días)</span>
+          <input
+            className="field"
+            type="number"
+            min={1}
+            step={1}
+            value={saleAge}
+            onChange={(e) => setSaleAge(e.target.value)}
+            placeholder="Ej. 21"
+          />
+          <span className="mt-1 block text-xs text-[var(--muted)]">
+            Edad usual de este suplidor. Al registrar una cepa puedes usar otra edad si esa compra llega
+            distinta.
+            {saleAge && Number.parseInt(saleAge, 10) > 0
+              ? ` ${formatAgeDays(Number.parseInt(saleAge, 10))}.`
+              : ''}
+          </span>
+        </label>
+        {saved && <SavedNotice />}
+        {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
+        <button className="btn btn-primary" type="submit">
+          {initial ? 'Guardar cambios' : 'Crear suplidor'}
         </button>
       </form>
     </Modal>

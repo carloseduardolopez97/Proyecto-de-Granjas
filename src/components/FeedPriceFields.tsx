@@ -11,7 +11,7 @@ export default function FeedPriceFields({
   usdRate,
   onUsdRate,
   hint,
-  priceUnit = 'QQ',
+  priceUnit = 'kg',
 }: {
   currency: FeedCurrency
   onCurrency: (value: FeedCurrency) => void

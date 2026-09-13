@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import FeedPriceFields, { pesosFromFields } from '../components/FeedPriceFields'
+import FeedQtyModeFields from '../components/FeedQtyModeFields'
 import FeedStorageFields from '../components/FeedStorageFields'
 import { ClearFiltersButton, FilterField, HistoryFilterBar, inDateRange, uniqueSorted } from '../components/HistoryFilters'
 import Modal, { afterSaveReadyForNext, SavedNotice } from '../components/Modal'
 import { useFeed, type FeedPurchaseInput } from '../context/FeedContext'
-import { feedStorageLabel, formatDop, formatDopUnit, formatUsd, todayIso } from '../lib/calc'
-import type { FeedCurrency, FeedProduct, FeedPurchase, FeedStorage } from '../lib/types'
+import { convertDisplayedFeedPrice, feedKgFromSacks, feedStorageLabel, formatDop, formatDopUnit, formatFeedPurchaseQty, formatKg, formatUsd, kgPriceToPerSack, sackPriceToPerKg, todayIso } from '../lib/calc'
+import type { FeedCurrency, FeedProduct, FeedPurchase, FeedQtyMode, FeedStorage } from '../lib/types'
 import { useQuickAdd } from '../lib/quickAdd'
 
 export default function FeedPage() {
@@ -46,39 +47,39 @@ export default function FeedPage() {
       ),
     [rows, feedFilter, fromDate, toDate, storageFilter],
   )
-  const filteredQq = useMemo(() => visibleRows.reduce((sum, row) => sum + row.quantityQq, 0), [visibleRows])
+  const filteredKg = useMemo(() => visibleRows.reduce((sum, row) => sum + row.quantityKg, 0), [visibleRows])
   const filteredCost = useMemo(
-    () => visibleRows.reduce((sum, row) => sum + row.quantityQq * row.pricePerQq, 0),
+    () => visibleRows.reduce((sum, row) => sum + row.quantityKg * row.pricePerKg, 0),
     [visibleRows],
   )
-  const totalQq = useMemo(() => rows.reduce((sum, row) => sum + row.quantityQq, 0), [rows])
-  const totalCost = useMemo(() => rows.reduce((sum, row) => sum + row.quantityQq * row.pricePerQq, 0), [rows])
-  const qqByFeed = useMemo(() => {
+  const totalKg = useMemo(() => rows.reduce((sum, row) => sum + row.quantityKg, 0), [rows])
+  const totalCost = useMemo(() => rows.reduce((sum, row) => sum + row.quantityKg * row.pricePerKg, 0), [rows])
+  const kgByFeed = useMemo(() => {
     const map = new Map<
       string,
-      { key: string; name: string; qq: number; cost: number; siloQq: number; sacoQq: number }
+      { key: string; name: string; kg: number; cost: number; siloKg: number; sacoKg: number }
     >()
     for (const product of state.products) {
-      map.set(product.id, { key: product.id, name: product.name, qq: 0, cost: 0, siloQq: 0, sacoQq: 0 })
+      map.set(product.id, { key: product.id, name: product.name, kg: 0, cost: 0, siloKg: 0, sacoKg: 0 })
     }
     for (const row of rows) {
       const key = row.feedId || row.feedName
-      const cost = row.quantityQq * row.pricePerQq
-      const current = map.get(key) ?? { key, name: row.feedName, qq: 0, cost: 0, siloQq: 0, sacoQq: 0 }
-      current.qq += row.quantityQq
+      const cost = row.quantityKg * row.pricePerKg
+      const current = map.get(key) ?? { key, name: row.feedName, kg: 0, cost: 0, siloKg: 0, sacoKg: 0 }
+      current.kg += row.quantityKg
       current.cost += cost
-      if (row.storage === 'silo') current.siloQq += row.quantityQq
-      else current.sacoQq += row.quantityQq
+      if (row.storage === 'silo') current.siloKg += row.quantityKg
+      else current.sacoKg += row.quantityKg
       map.set(key, current)
     }
     for (const use of state.uses ?? []) {
       const key = use.feedId || use.feedName
       const current = map.get(key)
       if (!current) continue
-      current.qq = Number((current.qq - use.quantityQq).toFixed(4))
+      current.kg = Number((current.kg - use.quantityKg).toFixed(4))
       current.cost = Math.max(0, current.cost - (use.cost || 0))
-      if (use.storage === 'silo') current.siloQq = Number((current.siloQq - use.quantityQq).toFixed(4))
-      else current.sacoQq = Number((current.sacoQq - use.quantityQq).toFixed(4))
+      if (use.storage === 'silo') current.siloKg = Number((current.siloKg - use.quantityKg).toFixed(4))
+      else current.sacoKg = Number((current.sacoKg - use.quantityKg).toFixed(4))
     }
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
   }, [rows, state.products, state.uses])
@@ -90,8 +91,8 @@ export default function FeedPage() {
           <p className="chip mb-3">Compras</p>
           <h2 className="font-display text-4xl">Registro de alimento</h2>
           <p className="mt-2 max-w-2xl text-[var(--muted)]">
-            Anota la fecha, el número de factura, cuántos QQ llegaron, si van a silo o a sacos, y el precio. Ese
-            precio y el almacenamiento quedan fijos en el historial.
+            Anota la fecha, el número de factura, si llega por kilos o por sacos (con el peso del saco), si va a silo
+            o a sacos, y el precio. El inventario y la alimentación se llevan en kilos.
           </p>
         </div>
         <button
@@ -114,22 +115,22 @@ export default function FeedPage() {
             <Link className="font-semibold underline" to="/ajustes">
               Ajustes
             </Link>{' '}
-            (la tuerca), con nombre y precio por QQ.
+            (la tuerca), con nombre y precio. Puedes registrar por kilo o por saco.
           </p>
         </div>
       )}
 
       <div className="mb-8 grid gap-3 sm:grid-cols-2">
-        <HoverStat label="QQ comprados" value={formatQq(totalQq)} breakdown={qqByFeed.filter((row) => row.qq > 0)} />
+        <HoverStat label="Kilos comprados" value={formatKg(totalKg)} breakdown={kgByFeed.filter((row) => row.kg > 0)} />
         <Stat label="Costo de compras" value={formatDop(totalCost)} />
       </div>
 
-      <h3 className="font-display mb-3 text-2xl">QQ por alimento</h3>
-      {qqByFeed.length === 0 ? (
-        <p className="mb-8 text-[var(--muted)]">Cuando registres un alimento, aquí verás cuántos QQ tiene cada tipo.</p>
+      <h3 className="font-display mb-3 text-2xl">Kilos por alimento</h3>
+      {kgByFeed.length === 0 ? (
+        <p className="mb-8 text-[var(--muted)]">Cuando registres un alimento, aquí verás cuántos kilos tiene cada tipo.</p>
       ) : (
         <div className="mb-8 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-          {qqByFeed.map((row) => {
+          {kgByFeed.map((row) => {
             const selected = feedFilter === row.name
             return (
             <button
@@ -144,10 +145,10 @@ export default function FeedPage() {
               }}
             >
               <h4 className="font-display text-2xl">{row.name}</h4>
-              <p className="mt-2 text-sm text-[var(--muted)]">QQ disponibles</p>
-              <p className="font-display text-3xl">{formatQq(row.qq)}</p>
+              <p className="mt-2 text-sm text-[var(--muted)]">Kilos disponibles</p>
+              <p className="font-display text-3xl">{formatKg(row.kg)}</p>
               <p className="mt-2 text-xs text-[var(--muted)]">
-                Silo {formatQq(row.siloQq)} QQ · Sacos {formatQq(row.sacoQq)} QQ
+                Silo {formatKg(row.siloKg)} kg · Sacos {formatKg(row.sacoKg)} kg
               </p>
               <p className="mt-3 text-sm text-[var(--muted)]">Costo</p>
               <p className="font-display text-2xl">{formatDop(row.cost)}</p>
@@ -212,7 +213,7 @@ export default function FeedPage() {
                 <th className="pb-2 font-semibold">Alimento</th>
                 <th className="pb-2 font-semibold">Almacenamiento</th>
                 <th className="pb-2 font-semibold">Cantidad</th>
-                <th className="pb-2 font-semibold">Precio / QQ</th>
+                <th className="pb-2 font-semibold">Precio / kg</th>
                 <th className="pb-2 font-semibold">Total</th>
                 <th className="pb-2 font-semibold" />
               </tr>
@@ -224,16 +225,16 @@ export default function FeedPage() {
                   <td className="py-3">{row.invoiceNumber}</td>
                   <td className="py-3">{row.feedName}</td>
                   <td className="py-3">{feedStorageLabel(row.storage)}</td>
-                  <td className="py-3">{row.quantityQq} QQ</td>
+                  <td className="py-3">{formatFeedPurchaseQty(row)}</td>
                   <td className="py-3">
-                    <div>{formatDopUnit(row.pricePerQq)}</div>
+                    <div>{formatDopUnit(row.pricePerKg)}</div>
                     {row.priceCurrency === 'USD' && row.usdAmount != null && row.usdRate ? (
                       <div className="text-xs text-[var(--muted)]">
                         {formatUsd(row.usdAmount)} · tasa {formatDop(row.usdRate)}
                       </div>
                     ) : null}
                   </td>
-                  <td className="py-3">{formatDop(row.quantityQq * row.pricePerQq)}</td>
+                  <td className="py-3">{formatDop(row.quantityKg * row.pricePerKg)}</td>
                   <td className="py-3">
                     <div className="flex justify-end gap-1">
                       <IconButton
@@ -258,9 +259,9 @@ export default function FeedPage() {
                 <td className="py-3 font-semibold" colSpan={4}>
                   Total
                 </td>
-                <td className="py-3 font-semibold">{formatQq(filteredQq)} QQ</td>
+                <td className="py-3 font-semibold">{formatKg(filteredKg)} kg</td>
                 <td className="py-3 font-semibold">
-                  {filteredQq > 0 ? `${formatDopUnit(filteredCost / filteredQq)} / QQ` : '—'}
+                  {filteredKg > 0 ? `${formatDopUnit(filteredCost / filteredKg)} / kg` : '—'}
                 </td>
                 <td className="py-3 font-semibold">{formatDop(filteredCost)}</td>
                 <td className="py-3" />
@@ -315,19 +316,23 @@ export default function FeedPage() {
 function applyProductMoney(
   product: FeedProduct,
   lastUsdRate: number | undefined,
+  qtyMode: FeedQtyMode,
+  sackWeightKg: number,
   setCurrency: (value: FeedCurrency) => void,
   setPrice: (value: string) => void,
   setUsdAmount: (value: string) => void,
   setUsdRate: (value: string) => void,
 ) {
   const currency = product.priceCurrency ?? 'DOP'
+  const perSack = qtyMode === 'saco' && sackWeightKg > 0
   setCurrency(currency)
   if (currency === 'USD') {
-    setUsdAmount(product.usdAmount != null ? String(product.usdAmount) : '')
+    const usd = product.usdAmount != null ? product.usdAmount : 0
+    setUsdAmount(product.usdAmount != null ? String(perSack ? kgPriceToPerSack(usd, sackWeightKg) : usd) : '')
     setUsdRate(String(product.usdRate ?? lastUsdRate ?? ''))
     setPrice('')
   } else {
-    setPrice(String(product.pricePerQq))
+    setPrice(String(perSack ? kgPriceToPerSack(product.pricePerKg, sackWeightKg) : product.pricePerKg))
     setUsdAmount('')
   }
 }
@@ -348,30 +353,39 @@ function FeedPurchaseForm({
   onSave: (input: FeedPurchaseInput) => string | null
 }) {
   const first = products[0]
+  const initialSack = Boolean(initial?.sackCount && initial?.sackWeightKg)
+  const firstSack = !initial && Boolean(first?.sackWeightKg)
   const [feedId, setFeedId] = useState(initial?.feedId ?? first?.id ?? '')
   const [date, setDate] = useState(initial?.date ?? todayIso())
   const [invoiceNumber, setInvoiceNumber] = useState(initial?.invoiceNumber ?? '')
-  const [quantity, setQuantity] = useState(initial ? String(initial.quantityQq) : '')
+  const [qtyMode, setQtyMode] = useState<FeedQtyMode>(initialSack || firstSack ? 'saco' : 'kg')
+  const [sackWeight, setSackWeight] = useState(
+    initial?.sackWeightKg
+      ? String(initial.sackWeightKg)
+      : first?.sackWeightKg
+        ? String(first.sackWeightKg)
+        : '',
+  )
+  const [sackCount, setSackCount] = useState(initial?.sackCount ? String(initial.sackCount) : '')
+  const [quantity, setQuantity] = useState(initial && !initialSack ? String(initial.quantityKg) : '')
   const [storage, setStorage] = useState<FeedStorage>(initial?.storage ?? 'saco')
   const [currency, setCurrency] = useState<FeedCurrency>(
     initial?.priceCurrency ?? first?.priceCurrency ?? 'DOP',
   )
-  const [price, setPrice] = useState(
-    initial
-      ? initial.priceCurrency !== 'USD'
-        ? String(initial.pricePerQq)
-        : ''
-      : first && first.priceCurrency !== 'USD'
-        ? String(first.pricePerQq)
-        : '',
-  )
-  const [usdAmount, setUsdAmount] = useState(
-    initial?.priceCurrency === 'USD' && initial.usdAmount != null
-      ? String(initial.usdAmount)
-      : !initial && first?.priceCurrency === 'USD' && first.usdAmount != null
-        ? String(first.usdAmount)
-        : '',
-  )
+  const [price, setPrice] = useState(() => {
+    const source = initial ?? (first && first.priceCurrency !== 'USD' ? first : null)
+    if (!source || source.priceCurrency === 'USD') return ''
+    const w = initial?.sackWeightKg ?? first?.sackWeightKg
+    if ((initialSack || firstSack) && w) return String(kgPriceToPerSack(source.pricePerKg, w))
+    return String(source.pricePerKg)
+  })
+  const [usdAmount, setUsdAmount] = useState(() => {
+    const source = initial ?? first
+    if (source?.priceCurrency !== 'USD' || source.usdAmount == null) return ''
+    const w = initial?.sackWeightKg ?? first?.sackWeightKg
+    if ((initialSack || firstSack) && w) return String(kgPriceToPerSack(source.usdAmount, w))
+    return String(source.usdAmount)
+  })
   const [usdRate, setUsdRate] = useState(
     initial?.priceCurrency === 'USD' && initial.usdRate
       ? String(initial.usdRate)
@@ -383,29 +397,52 @@ function FeedPurchaseForm({
   )
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-  const qty = Number(quantity) || 0
+  const weight = Number(sackWeight) || 0
+  const sacks = Number(sackCount) || 0
+  const qtyKg = qtyMode === 'saco' ? feedKgFromSacks(sacks, weight) : Number(quantity) || 0
   const pesos = pesosFromFields(currency, price, usdAmount, usdRate)
+  const lineTotal = qtyMode === 'saco' ? sacks * pesos : qtyKg * pesos
+  const priceUnit = qtyMode === 'saco' ? 'saco' : 'kg'
+
+  function changeMode(next: FeedQtyMode) {
+    const converted = convertDisplayedFeedPrice({ price, usdAmount }, qtyMode, next, weight)
+    setPrice(converted.price)
+    setUsdAmount(converted.usdAmount)
+    setQtyMode(next)
+  }
 
   function pickFeed(id: string) {
     setFeedId(id)
     const product = products.find((item) => item.id === id)
     if (product && !initial) {
-      applyProductMoney(product, lastUsdRate, setCurrency, setPrice, setUsdAmount, setUsdRate)
+      const nextMode: FeedQtyMode = product.sackWeightKg ? 'saco' : 'kg'
+      const nextWeight = product.sackWeightKg ?? 0
+      setQtyMode(nextMode)
+      setSackWeight(product.sackWeightKg ? String(product.sackWeightKg) : sackWeight)
+      applyProductMoney(product, lastUsdRate, nextMode, nextWeight, setCurrency, setPrice, setUsdAmount, setUsdRate)
     }
   }
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    const bySack = qtyMode === 'saco'
     const message = onSave({
       feedId,
       date,
       invoiceNumber,
-      quantityQq: Number(quantity),
+      quantityKg: qtyKg,
       storage,
       priceCurrency: currency,
-      pricePerQq: Number(price),
-      usdAmount: currency === 'USD' ? Number(usdAmount) : undefined,
+      pricePerKg: bySack ? sackPriceToPerKg(Number(price), weight) : Number(price),
+      usdAmount:
+        currency === 'USD'
+          ? bySack
+            ? sackPriceToPerKg(Number(usdAmount), weight)
+            : Number(usdAmount)
+          : undefined,
       usdRate: currency === 'USD' ? Number(usdRate) : undefined,
+      sackCount: bySack ? sacks : undefined,
+      sackWeightKg: bySack ? weight : undefined,
     })
     if (message) {
       setSaved(false)
@@ -419,8 +456,11 @@ function FeedPurchaseForm({
     const product = products.find((item) => item.id === feedId)
     setInvoiceNumber('')
     setQuantity('')
+    setSackCount('')
     setDate(todayIso())
-    if (product) applyProductMoney(product, lastUsdRate, setCurrency, setPrice, setUsdAmount, setUsdRate)
+    if (product) {
+      applyProductMoney(product, lastUsdRate, qtyMode, weight, setCurrency, setPrice, setUsdAmount, setUsdRate)
+    }
     setError(null)
     setSaved(true)
     afterSaveReadyForNext(e)
@@ -453,18 +493,33 @@ function FeedPurchaseForm({
             required
           />
         </label>
-        <label>
-          <span className="label">Cantidad comprada (QQ)</span>
-          <input
-            className="field"
-            type="number"
-            min={0.01}
-            step="any"
-            value={quantity}
-            onChange={(e) => setQuantity(e.target.value)}
-            required
-          />
-        </label>
+        <FeedQtyModeFields
+          mode={qtyMode}
+          onMode={changeMode}
+          sackWeight={sackWeight}
+          onSackWeight={setSackWeight}
+          sackCount={sackCount}
+          onSackCount={setSackCount}
+          showCount
+        />
+        {qtyMode === 'kg' ? (
+          <label>
+            <span className="label">Cantidad comprada (kg)</span>
+            <input
+              className="field"
+              type="number"
+              min={0.01}
+              step="any"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              required
+            />
+          </label>
+        ) : qtyKg > 0 ? (
+          <p className="text-sm text-[var(--muted)]">
+            En kilos: {formatKg(qtyKg)} kg ({formatKg(sacks)} sacos × {formatKg(weight)} kg)
+          </p>
+        ) : null}
         <FeedStorageFields value={storage} onChange={setStorage} />
         <FeedPriceFields
           currency={currency}
@@ -475,9 +530,10 @@ function FeedPurchaseForm({
           onUsdAmount={setUsdAmount}
           usdRate={usdRate}
           onUsdRate={setUsdRate}
+          priceUnit={priceUnit}
         />
-        {qty > 0 && pesos >= 0 && (
-          <p className="text-sm text-[var(--muted)]">Total: {formatDop(qty * pesos)}</p>
+        {qtyKg > 0 && pesos >= 0 && (
+          <p className="text-sm text-[var(--muted)]">Total: {formatDop(lineTotal)}</p>
         )}
         {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
@@ -487,10 +543,6 @@ function FeedPurchaseForm({
       </form>
     </Modal>
   )
-}
-
-function formatQq(amount: number): string {
-  return new Intl.NumberFormat('es-DO', { maximumFractionDigits: 2 }).format(amount)
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -509,7 +561,7 @@ function HoverStat({
 }: {
   label: string
   value: string
-  breakdown: Array<{ key: string; name: string; qq: number }>
+  breakdown: Array<{ key: string; name: string; kg: number }>
 }) {
   return (
     <div className="group relative">
@@ -525,7 +577,7 @@ function HoverStat({
             {breakdown.map((row) => (
               <li key={row.key} className="flex justify-between gap-2">
                 <span>{row.name}</span>
-                <strong>{formatQq(row.qq)} QQ</strong>
+                <strong>{formatKg(row.kg)} kg</strong>
               </li>
             ))}
           </ul>

@@ -7,6 +7,9 @@ import { useCepa } from '../context/CepaContext'
 import { usePharmacy } from '../context/PharmacyContext'
 import {
   applyInjectionUse,
+  desteteCostGroups,
+  engordeCostGroups,
+  type CostGroup,
   costInCop,
   farmStageLabel,
   formatMoney,
@@ -19,7 +22,6 @@ import {
   injectionUseSummary,
   isVolumeUnit,
   isAlertDismissed,
-  mergeLocationCatalogs,
   mergePurchases,
   packPriceLabel,
   pharmacyRestockAlerts,
@@ -40,7 +42,7 @@ import {
   usesPackageSize,
 } from '../lib/calc'
 import { useQuickAdd } from '../lib/quickAdd'
-import { STOCK_UNITS, type CostCurrency, type CepaLocation, type FarmStage, type Injection, type InjectionLine, type InjectionUse, type InjectionUseAllocation, type MedicationEntry, type MedicationProfile, type MedicationPurchase, type StockUnit } from '../lib/types'
+import { STOCK_UNITS, type CostCurrency, type FarmStage, type Injection, type InjectionLine, type InjectionUse, type InjectionUseAllocation, type MedicationEntry, type MedicationProfile, type MedicationPurchase, type StockUnit } from '../lib/types'
 
 export default function PharmacyPage() {
   const {
@@ -59,8 +61,8 @@ export default function PharmacyPage() {
     dismissRestockAlerts,
   } = usePharmacy()
   const { state: cepaState } = useCepa()
-  const desteteLocations = cepaState.locations ?? []
-  const engordeLocations = mergeLocationCatalogs(desteteLocations, cepaState.engordeLocations ?? [])
+  const desteteGroups = desteteCostGroups(cepaState.cepas)
+  const engordeGroups = engordeCostGroups(cepaState.cepas, cepaState.engordeLots ?? [])
   const [entryOpen, setEntryOpen] = useState(false)
   const [editingEntry, setEditingEntry] = useState<MedicationEntry | null>(null)
   const [restocking, setRestocking] = useState<{ name: string; unit: StockUnit } | null>(null)
@@ -453,6 +455,9 @@ export default function PharmacyPage() {
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h4 className="font-display text-2xl">{injection.name}</h4>
+                  {injection.description && (
+                    <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--muted)]">{injection.description}</p>
+                  )}
                   <p className="mt-1 text-sm text-[var(--muted)]">
                     {injection.lines
                       .map((line) => `${formatQty(line.amount, line.unit)} de ${line.medicationName}`)
@@ -662,15 +667,16 @@ export default function PharmacyPage() {
           knownMeds={knownMeds}
           isEdit={Boolean(editing)}
           initialName={editing?.name ?? ''}
+          initialDescription={editing?.description ?? ''}
           initialLines={editing?.lines}
           onClose={() => {
             setInjectionOpen(false)
             setEditing(null)
           }}
-          onSave={(injectionName, lines) => {
+          onSave={(injectionName, lines, description) => {
             const message = editing
-              ? updateInjection(editing.id, injectionName, lines)
-              : addInjection(injectionName, lines)
+              ? updateInjection(editing.id, injectionName, lines, description)
+              : addInjection(injectionName, lines, description)
             if (message) return message
             if (editing) {
               setInjectionOpen(false)
@@ -692,14 +698,17 @@ export default function PharmacyPage() {
               {state.injections.map((injection) => (
                 <li key={injection.id}>
                   <button
-                    className="btn btn-ghost w-full justify-start"
+                    className="btn btn-ghost w-full flex-col items-start justify-start text-left"
                     type="button"
                     onClick={() => {
                       setPickUse(false)
                       setUseOpen(injection.id)
                     }}
                   >
-                    {injection.name}
+                    <span>{injection.name}</span>
+                    {injection.description && (
+                      <span className="mt-0.5 text-xs font-normal text-[var(--muted)]">{injection.description}</span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -712,8 +721,8 @@ export default function PharmacyPage() {
         <UseModal
           injection={state.injections.find((item) => item.id === useOpen)}
           entries={state.entries}
-          desteteLocations={desteteLocations}
-          engordeLocations={engordeLocations}
+          desteteGroups={desteteGroups}
+          engordeGroups={engordeGroups}
           onClose={() => setUseOpen(null)}
           onSave={(doses, useDate, stage, allocations) => {
             const message = useInjection(useOpen, doses, useDate, stage, allocations)
@@ -727,8 +736,8 @@ export default function PharmacyPage() {
         <EditUseModal
           initial={editingUse}
           injectionName={useInjectionLabel(editingUse, state.injections) || 'Uso'}
-          desteteLocations={desteteLocations}
-          engordeLocations={engordeLocations}
+          desteteGroups={desteteGroups}
+          engordeGroups={engordeGroups}
           onClose={() => setEditingUse(null)}
           onSave={(doses, useDate, stage, allocations) => {
             const message = updateUse(editingUse.id, useDate, doses, stage, allocations)
@@ -1171,6 +1180,7 @@ function InjectionModal({
   knownMeds,
   isEdit = false,
   initialName = '',
+  initialDescription = '',
   initialLines,
   onClose,
   onSave,
@@ -1179,9 +1189,10 @@ function InjectionModal({
   knownMeds: Array<{ name: string; unit: StockUnit }>
   isEdit?: boolean
   initialName?: string
+  initialDescription?: string
   initialLines?: InjectionLine[]
   onClose: () => void
-  onSave: (name: string, lines: InjectionLine[]) => string | null
+  onSave: (name: string, lines: InjectionLine[], description: string) => string | null
 }) {
   const emptyLine = (): InjectionLine => ({
     medicationName: knownMeds[0]?.name ?? '',
@@ -1189,6 +1200,7 @@ function InjectionModal({
     unit: knownMeds[0]?.unit ?? 'ml',
   })
   const [name, setName] = useState(initialName)
+  const [description, setDescription] = useState(initialDescription)
   const [lines, setLines] = useState<InjectionLine[]>(
     initialLines && initialLines.length > 0 ? initialLines : [emptyLine()],
   )
@@ -1197,7 +1209,7 @@ function InjectionModal({
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    const message = onSave(name, lines)
+    const message = onSave(name, lines, description)
     if (message) {
       setSaved(false)
       setError(message)
@@ -1205,6 +1217,7 @@ function InjectionModal({
     }
     if (isEdit) return
     setName('')
+    setDescription('')
     setLines([emptyLine()])
     setError(null)
     setSaved(true)
@@ -1221,6 +1234,16 @@ function InjectionModal({
         <label>
           <span className="label">Nombre de la inyección</span>
           <input className="field" value={name} onChange={(e) => setName(e.target.value)} required />
+        </label>
+        <label>
+          <span className="label">Para qué sirve (opcional)</span>
+          <textarea
+            className="field min-h-[5.5rem] resize-y"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Ej. hierro para lechones, desparasitar, etc."
+            rows={3}
+          />
         </label>
         <p className="text-sm text-[var(--muted)]">
           La dosis puede ir en ml aunque el medicamento haya llegado en litros: 1 ml descuenta 1 ml de
@@ -1308,135 +1331,119 @@ function InjectionModal({
 }
 
 function collectAllocations(
-  placements: Array<{ locationId: string; locationName: string; doses: string }>,
-  locations: CepaLocation[],
+  placements: Array<{ cepaId: string; doses: string }>,
+  groups: CostGroup[],
 ): InjectionUseAllocation[] {
   return placements.flatMap((row) => {
     const count = Number.parseInt(row.doses, 10) || 0
-    if (!row.locationId || count <= 0) return []
-    const found = locations.find((item) => item.id === row.locationId)
+    if (!row.cepaId || count <= 0) return []
+    const found = groups.find((item) => item.id === row.cepaId)
     return [
       {
-        locationId: row.locationId,
-        location: found?.name || row.locationName,
+        cepaId: row.cepaId,
+        cepaName: found?.label ?? '',
         doses: count,
+        locationId: found?.locationId,
+        location: found?.location,
       },
     ]
   })
 }
 
-function InjectionCageFields({
-  locations,
+function InjectionCepaFields({
+  groups,
   doses,
   placements,
   setPlacements,
 }: {
-  locations: CepaLocation[]
+  groups: CostGroup[]
   doses: number
-  placements: Array<{ key: string; locationId: string; locationName: string; doses: string }>
+  placements: Array<{ key: string; cepaId: string; doses: string }>
   setPlacements: (
     update:
-      | Array<{ key: string; locationId: string; locationName: string; doses: string }>
-      | ((
-          rows: Array<{ key: string; locationId: string; locationName: string; doses: string }>,
-        ) => Array<{ key: string; locationId: string; locationName: string; doses: string }>),
+      | Array<{ key: string; cepaId: string; doses: string }>
+      | ((rows: Array<{ key: string; cepaId: string; doses: string }>) => Array<{ key: string; cepaId: string; doses: string }>),
   ) => void
 }) {
   const placed = placements.reduce((sum, row) => sum + (Number.parseInt(row.doses, 10) || 0), 0)
   return (
     <div>
-      <span className="label">Jaula</span>
+      <span className="label">Cepa</span>
       <p className="mb-2 text-xs text-[var(--muted)]">
-        Opcional. Si asignas, reparte las {doses} dosis entre una o varias jaulas. Las jaulas se crean
-        en{' '}
-        <Link className="font-semibold underline" to="/ajustes">
-          Ajustes
-        </Link>
-        .
+        El costo queda en ese grupo de lechones. Reparte las {doses} dosis entre una o varias cepas.
       </p>
       <div className="grid gap-2">
-        {placements.map((row) => {
-          const inCatalog = locations.some((item) => item.id === row.locationId)
-          return (
-            <div
-              key={row.key}
-              className="grid gap-2 rounded-2xl border border-[var(--line)] p-3 sm:grid-cols-[1fr_7rem_auto]"
-            >
-              <label>
-                <span className="label">Jaula</span>
-                <select
-                  className="field"
-                  value={inCatalog || row.locationId ? row.locationId : ''}
-                  onChange={(e) => {
-                    const id = e.target.value
-                    const found = locations.find((item) => item.id === id)
-                    setPlacements((rows) =>
-                      rows.map((item) =>
-                        item.key === row.key
-                          ? {
-                              ...item,
-                              locationId: id,
-                              locationName: found?.name ?? (id === row.locationId ? row.locationName : ''),
-                            }
-                          : item,
-                      ),
-                    )
-                  }}
-                >
-                  <option value="">Sin asignar</option>
-                  {!inCatalog && row.locationId && (
-                    <option value={row.locationId}>{row.locationName}</option>
-                  )}
-                  {locations.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span className="label">Cantidad</span>
-                <input
-                  className="field"
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={row.doses}
-                  onChange={(e) =>
-                    setPlacements((rows) =>
-                      rows.map((item) => (item.key === row.key ? { ...item, doses: e.target.value } : item)),
-                    )
-                  }
-                />
-              </label>
-              {placements.length > 1 ? (
-                <button
-                  className="btn btn-ghost self-end"
-                  type="button"
-                  onClick={() => setPlacements((rows) => rows.filter((item) => item.key !== row.key))}
-                >
-                  Quitar
-                </button>
-              ) : (
-                <span className="hidden sm:block" />
-              )}
-            </div>
-          )
-        })}
+        {placements.map((row) => (
+          <div
+            key={row.key}
+            className="grid gap-2 rounded-2xl border border-[var(--line)] p-3 sm:grid-cols-[1fr_7rem_auto]"
+          >
+            <label>
+              <span className="label">Cepa</span>
+              <select
+                className="field"
+                value={row.cepaId}
+                onChange={(e) => {
+                  const id = e.target.value
+                  setPlacements((rows) =>
+                    rows.map((item) => (item.key === row.key ? { ...item, cepaId: id } : item)),
+                  )
+                }}
+                required
+              >
+                <option value="">Elegir cepa</option>
+                {groups.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="label">Cantidad</span>
+              <input
+                className="field"
+                type="number"
+                min={1}
+                step={1}
+                value={row.doses}
+                onChange={(e) =>
+                  setPlacements((rows) =>
+                    rows.map((item) => (item.key === row.key ? { ...item, doses: e.target.value } : item)),
+                  )
+                }
+              />
+            </label>
+            {placements.length > 1 ? (
+              <button
+                className="btn btn-ghost self-end"
+                type="button"
+                onClick={() => setPlacements((rows) => rows.filter((item) => item.key !== row.key))}
+              >
+                Quitar
+              </button>
+            ) : (
+              <span className="hidden sm:block" />
+            )}
+          </div>
+        ))}
       </div>
       <button
         className="btn btn-ghost mt-2"
         type="button"
-        onClick={() =>
-          setPlacements((rows) => [...rows, { key: uid(), locationId: '', locationName: '', doses: '' }])
-        }
+        onClick={() => setPlacements((rows) => [...rows, { key: uid(), cepaId: groups[0]?.id ?? '', doses: '' }])}
       >
-        Añadir otra jaula
+        Añadir otra cepa
       </button>
+      {groups.length === 0 && (
+        <p className="mt-2 text-sm text-[var(--danger)]">
+          No hay cepas en esta etapa. Regístralas en Destete o trasládalas a Engorde.
+        </p>
+      )}
       {placed > 0 && (
         <p className={`mt-2 text-sm ${placed === doses ? 'text-[var(--muted)]' : 'text-[var(--danger)]'}`}>
           Repartidas {placed} de {doses} dosis
-          {placed !== doses ? '. Deben coincidir para guardar la asignación.' : '.'}
+          {placed !== doses ? '. Deben coincidir para guardar.' : '.'}
         </p>
       )}
     </div>
@@ -1446,15 +1453,15 @@ function InjectionCageFields({
 function UseModal({
   injection,
   entries,
-  desteteLocations,
-  engordeLocations,
+  desteteGroups,
+  engordeGroups,
   onClose,
   onSave,
 }: {
   injection?: Injection
   entries: MedicationEntry[]
-  desteteLocations: CepaLocation[]
-  engordeLocations: CepaLocation[]
+  desteteGroups: CostGroup[]
+  engordeGroups: CostGroup[]
   onClose: () => void
   onSave: (
     doses: number,
@@ -1467,16 +1474,16 @@ function UseModal({
   const [date, setDate] = useState(todayIso())
   const [stage, setStage] = useState<FarmStage>('destete')
   const [placements, setPlacements] = useState(() => [
-    { key: uid(), locationId: '', locationName: '', doses: '' },
+    { key: uid(), cepaId: desteteGroups[0]?.id ?? '', doses: String(1) },
   ])
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-  const locations = stage === 'engorde' ? engordeLocations : desteteLocations
+  const groups = stage === 'engorde' ? engordeGroups : desteteGroups
   const preview = injection ? applyInjectionUse(entries, injection, doses) : { ok: false, cost: 0 }
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    const message = onSave(doses, date, stage, collectAllocations(placements, locations))
+    const message = onSave(doses, date, stage, collectAllocations(placements, groups))
     if (message) {
       setSaved(false)
       setError(message)
@@ -1484,7 +1491,7 @@ function UseModal({
     }
     setDoses(1)
     setDate(todayIso())
-    setPlacements([{ key: uid(), locationId: '', locationName: '', doses: '' }])
+    setPlacements([{ key: uid(), cepaId: groups[0]?.id ?? '', doses: '1' }])
     setError(null)
     setSaved(true)
     afterSaveReadyForNext(e)
@@ -1493,6 +1500,14 @@ function UseModal({
   return (
     <Modal title="Registrar uso" onClose={onClose}>
       <form className="grid gap-3" onSubmit={submit}>
+        {injection && (
+          <div>
+            <p className="font-medium">{injection.name}</p>
+            {injection.description && (
+              <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--muted)]">{injection.description}</p>
+            )}
+          </div>
+        )}
         <label>
           <span className="label">Fecha</span>
           <input className="field" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
@@ -1511,11 +1526,12 @@ function UseModal({
           value={stage}
           onChange={(next) => {
             setStage(next)
-            setPlacements([{ key: uid(), locationId: '', locationName: '', doses: '' }])
+            const nextGroups = next === 'engorde' ? engordeGroups : desteteGroups
+            setPlacements([{ key: uid(), cepaId: nextGroups[0]?.id ?? '', doses: String(doses || 1) }])
           }}
         />
-        <InjectionCageFields
-          locations={locations}
+        <InjectionCepaFields
+          groups={groups}
           doses={doses}
           placements={placements}
           setPlacements={setPlacements}
@@ -1527,7 +1543,7 @@ function UseModal({
         </p>
         {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
-        <button className="btn btn-primary" type="submit">
+        <button className="btn btn-primary" disabled={groups.length === 0} type="submit">
           Descontar del inventario
         </button>
       </form>
@@ -1538,15 +1554,15 @@ function UseModal({
 function EditUseModal({
   initial,
   injectionName,
-  desteteLocations,
-  engordeLocations,
+  desteteGroups,
+  engordeGroups,
   onClose,
   onSave,
 }: {
   initial: InjectionUse
   injectionName: string
-  desteteLocations: CepaLocation[]
-  engordeLocations: CepaLocation[]
+  desteteGroups: CostGroup[]
+  engordeGroups: CostGroup[]
   onClose: () => void
   onSave: (
     doses: number,
@@ -1563,19 +1579,18 @@ function EditUseModal({
     if (allocations.length > 0) {
       return allocations.map((item) => ({
         key: uid(),
-        locationId: item.locationId,
-        locationName: item.location,
+        cepaId: item.cepaId ?? '',
         doses: String(item.doses),
       }))
     }
-    return [{ key: uid(), locationId: '', locationName: '', doses: '' }]
+    return [{ key: uid(), cepaId: desteteGroups[0]?.id ?? '', doses: String(initial.doses) }]
   })
   const [error, setError] = useState<string | null>(null)
-  const locations = stage === 'engorde' ? engordeLocations : desteteLocations
+  const groups = stage === 'engorde' ? engordeGroups : desteteGroups
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    const message = onSave(doses, date, stage, collectAllocations(placements, locations))
+    const message = onSave(doses, date, stage, collectAllocations(placements, groups))
     if (message) setError(message)
   }
 
@@ -1601,17 +1616,18 @@ function EditUseModal({
           value={stage}
           onChange={(next) => {
             setStage(next)
-            setPlacements([{ key: uid(), locationId: '', locationName: '', doses: '' }])
+            const nextGroups = next === 'engorde' ? engordeGroups : desteteGroups
+            setPlacements([{ key: uid(), cepaId: nextGroups[0]?.id ?? '', doses: String(doses) }])
           }}
         />
-        <InjectionCageFields
-          locations={locations}
+        <InjectionCepaFields
+          groups={groups}
           doses={doses}
           placements={placements}
           setPlacements={setPlacements}
         />
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
-        <button className="btn btn-primary" type="submit">
+        <button className="btn btn-primary" disabled={groups.length === 0} type="submit">
           Guardar cambios
         </button>
       </form>

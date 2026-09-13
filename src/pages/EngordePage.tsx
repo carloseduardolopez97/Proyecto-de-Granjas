@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import DeathForm from '../components/DeathForm'
 import FeedUseForm, { FeedUseHistory } from '../components/FeedUseForm'
 import StageActionHistory from '../components/StageActionHistory'
 import { ClearFiltersButton, FilterField, HistoryFilterBar, inDateRange } from '../components/HistoryFilters'
@@ -11,14 +12,18 @@ import {
   cepaAgeOnDate,
   cepaAvgWeightKg,
   cepaLiveOnDate,
+  deathStage,
+  engordeDeathsUpTo,
   engordeLocationLiveCount,
+  engordeLotLiveOnDate,
   engordeLotsAsMovements,
   formatAgeDays,
   formatKg,
   latestCepaWeight,
-  mergeLocationCatalogs,
+  engordeCostGroups,
+  cepaCostSheets,
+  emptyCepaCostSheet,
   splitKgByHeads,
-  stageUsageCosts,
   buildStageActions,
   formatDop,
   todayIso,
@@ -28,7 +33,7 @@ import { useQuickAdd } from '../lib/quickAdd'
 import type { Cepa, CepaDeath, CepaLocation, CepaWeighing, EngordeLot, FeedUse } from '../lib/types'
 
 export default function EngordePage() {
-  const { state, addEngordeLots, updateEngordeLot, deleteEngordeLot } = useCepa()
+  const { state, addEngordeLots, updateEngordeLot, deleteEngordeLot, addDeath, updateDeath, deleteDeath } = useCepa()
   const feed = useFeed()
   const pharmacy = usePharmacy()
   const [formOpen, setFormOpen] = useState(false)
@@ -37,6 +42,9 @@ export default function EngordePage() {
   const [feedOpen, setFeedOpen] = useState(false)
   const [editingFeedUse, setEditingFeedUse] = useState<FeedUse | null>(null)
   const [removingFeedUse, setRemovingFeedUse] = useState<FeedUse | null>(null)
+  const [deathOpen, setDeathOpen] = useState(false)
+  const [deathLot, setDeathLot] = useState<EngordeLot | null>(null)
+  const [editingDeath, setEditingDeath] = useState<CepaDeath | null>(null)
   const [locationFilter, setLocationFilter] = useState('')
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
@@ -51,9 +59,15 @@ export default function EngordePage() {
       setEditingFeedUse(null)
       setFeedOpen(true)
     },
+    'muerte-engorde': () => {
+      setEditingDeath(null)
+      setDeathLot(state.engordeLots?.[0] ?? null)
+      setDeathOpen(true)
+    },
   })
 
-  const rooms = mergeLocationCatalogs(state.locations ?? [], state.engordeLocations ?? [])
+  const desteteRooms = state.locations ?? []
+  const rooms = state.engordeLocations ?? []
   const lots = useMemo(
     () => [...(state.engordeLots ?? [])].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)),
     [state.engordeLots],
@@ -71,46 +85,62 @@ export default function EngordePage() {
       }),
     [lots, locationFilter, fromDate, toDate, rooms],
   )
+  const deaths = state.deaths ?? []
   const byRoom = useMemo(() => {
-    const map = new Map<string, { id: string; name: string; pigs: number; lots: number; kg: number; capacity: number }>()
+    const map = new Map<
+      string,
+      { id: string; name: string; pigs: number; dead: number; lots: number; kg: number; capacity: number }
+    >()
     for (const loc of rooms) {
       map.set(loc.id, {
         id: loc.id,
         name: loc.name,
         pigs: 0,
+        dead: 0,
         lots: 0,
         kg: 0,
         capacity: loc.capacity || 0,
       })
     }
     for (const row of lots) {
-      const key = row.locationId || row.location.trim() || 'sin'
-      const catalog = rooms.find((item) => item.id === row.locationId)
+      const catalog =
+        rooms.find((item) => item.id === row.locationId) ??
+        rooms.find((item) => item.name.trim().toLowerCase() === row.location.trim().toLowerCase())
+      const key = catalog?.id || row.locationId || row.location.trim() || 'sin'
       const name = catalog?.name || row.location.trim() || 'Sin sala'
       const current = map.get(key) ?? {
         id: key,
         name,
         pigs: 0,
+        dead: 0,
         lots: 0,
         kg: 0,
         capacity: catalog?.capacity || 0,
       }
-      current.pigs += row.pigCount
+      const live = engordeLotLiveOnDate(row, deaths)
+      const dead = engordeDeathsUpTo(deaths, row.id)
+      const ratio = row.pigCount > 0 ? live / row.pigCount : 0
+      current.pigs += live
+      current.dead += dead
       current.lots += 1
-      current.kg += row.totalWeightKg
+      current.kg += row.totalWeightKg * ratio
       map.set(key, current)
     }
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'))
-  }, [lots, rooms])
-  const usage = useMemo(
+  }, [lots, rooms, deaths])
+  const costLedger = useMemo(
     () =>
-      stageUsageCosts({
-        stage: 'engorde',
-        locations: rooms,
+      cepaCostSheets({
+        cepas: state.cepas,
+        lots,
         feedUses: feed.state.uses ?? [],
         injectionUses: pharmacy.state.uses,
       }),
-    [rooms, feed.state.uses, pharmacy.state.uses],
+    [state.cepas, lots, feed.state.uses, pharmacy.state.uses],
+  )
+  const sheetById = useMemo(
+    () => new Map(costLedger.sheets.map((item) => [item.cepaId, item])),
+    [costLedger.sheets],
   )
   const feedUseRows = useMemo(
     () =>
@@ -124,27 +154,33 @@ export default function EngordePage() {
       buildStageActions({
         stage: 'engorde',
         lots,
+        deaths,
         feedUses: feed.state.uses ?? [],
         injectionUses: pharmacy.state.uses,
         injections: pharmacy.state.injections,
       }),
-    [lots, feed.state.uses, pharmacy.state.uses, pharmacy.state.injections],
+    [lots, deaths, feed.state.uses, pharmacy.state.uses, pharmacy.state.injections],
   )
   const totals = useMemo(
     () =>
       visibleRows.reduce(
         (acc, row) => {
-          acc.pigs += row.pigCount
-          acc.kg += row.totalWeightKg
+          const live = engordeLotLiveOnDate(row, deaths)
+          const ratio = row.pigCount > 0 ? live / row.pigCount : 0
+          acc.pigs += live
+          acc.kg += row.totalWeightKg * ratio
           return acc
         },
         { pigs: 0, kg: 0 },
       ),
-    [visibleRows],
+    [visibleRows, deaths],
   )
-  const allPigs = lots.reduce((sum, row) => sum + row.pigCount, 0)
+  const allPigs = lots.reduce((sum, row) => sum + engordeLotLiveOnDate(row, deaths), 0)
+  const allDead = deaths
+    .filter((item) => deathStage(item) === 'engorde')
+    .reduce((sum, item) => sum + item.count, 0)
   const desteteWithLive = state.cepas.some(
-    (row) => cepaLiveOnDate(row, state.deaths ?? [], undefined, undefined, engordeLotsAsMovements(lots)) > 0,
+    (row) => cepaLiveOnDate(row, deaths, undefined, undefined, engordeLotsAsMovements(lots)) > 0,
   )
 
   return (
@@ -154,8 +190,9 @@ export default function EngordePage() {
           <p className="chip mb-3">Crecimiento</p>
           <h2 className="font-display text-4xl">Engorde</h2>
           <p className="mt-2 max-w-2xl text-[var(--muted)]">
-            Aquí quedan los cerdos que salen de destete. Elige las jaulas al trasladar. Si hace falta
-            una habitación aparte, añádela en Ajustes. El inventario de Cepa baja con el traslado.
+            El traslado es una transferencia: de una jaula de destete ya creada a una sala de engorde ya
+            creada. Las salas se crean en Ajustes, no en este paso. El inventario de Cepa baja con el
+            traslado.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -168,6 +205,18 @@ export default function EngordePage() {
             }}
           >
             Alimentar
+          </button>
+          <button
+            className="btn btn-ghost"
+            type="button"
+            disabled={lots.length === 0}
+            onClick={() => {
+              setEditingDeath(null)
+              setDeathLot(lots[0] ?? null)
+              setDeathOpen(true)
+            }}
+          >
+            Registrar muerte
           </button>
           <button
             className="btn btn-primary"
@@ -183,19 +232,19 @@ export default function EngordePage() {
         </div>
       </div>
 
-      {rooms.length === 0 && (
+      {desteteRooms.length === 0 || rooms.length === 0 ? (
         <div className="mb-6 rounded-3xl border border-[var(--clay)] bg-[var(--clay-soft)] p-4">
           <p className="text-sm">
-            Primero crea las salas de engorde en{' '}
+            Primero crea las jaulas de destete y las salas de engorde en{' '}
             <Link className="font-semibold underline" to="/ajustes">
               Ajustes
             </Link>
-            . Pueden ser distintas a las jaulas de destete.
+            . El traslado solo mueve cerdos entre esas salas; no crea habitaciones nuevas.
           </p>
         </div>
-      )}
+      ) : null}
 
-      <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <HoverStat
           label="Cerdos en engorde"
           value={String(allPigs)}
@@ -206,6 +255,18 @@ export default function EngordePage() {
             value: String(row.pigs),
           }))}
         />
+        <HoverStat
+          label="Muertos"
+          value={String(allDead)}
+          empty="Aún no hay muertes en engorde."
+          breakdown={byRoom
+            .filter((row) => row.dead > 0)
+            .map((row) => ({
+              key: `${row.id}-dead`,
+              name: row.name,
+              value: String(row.dead),
+            }))}
+        />
         <Stat label="Peso al traslado" value={`${formatKg(lots.reduce((sum, row) => sum + row.totalWeightKg, 0))} kg`} />
         <Stat label="Traslados" value={String(lots.length)} />
       </div>
@@ -213,34 +274,40 @@ export default function EngordePage() {
       <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <HoverStat
           label="Alimento usado"
-          value={formatDop(usage.totals.feedCost)}
+          value={formatDop(costLedger.sheets.reduce((sum, row) => sum + row.engordeFeedCost, 0))}
           empty="Aún no hay alimento asignado."
-          breakdown={usage.rows
-            .filter((row) => row.feedCost > 0)
-            .map((row) => ({ key: `feed-${row.key}`, name: row.name, value: formatDop(row.feedCost) }))}
+          breakdown={costLedger.sheets
+            .filter((row) => row.engordeFeedCost > 0)
+            .map((row) => ({ key: `feed-${row.cepaId}`, name: row.label, value: formatDop(row.engordeFeedCost) }))}
         />
         <HoverStat
           label="Farmacia usada"
-          value={formatDop(usage.totals.pharmacyCost)}
-          empty="Asigna inyecciones a estas jaulas en Farmacia."
-          breakdown={usage.rows
-            .filter((row) => row.pharmacyCost > 0)
-            .map((row) => ({ key: `pharm-${row.key}`, name: row.name, value: formatDop(row.pharmacyCost) }))}
+          value={formatDop(costLedger.sheets.reduce((sum, row) => sum + row.engordePharmacyCost, 0))}
+          empty="Asigna inyecciones a estas cepas en Farmacia."
+          breakdown={costLedger.sheets
+            .filter((row) => row.engordePharmacyCost > 0)
+            .map((row) => ({ key: `pharm-${row.cepaId}`, name: row.label, value: formatDop(row.engordePharmacyCost) }))}
         />
         <HoverStat
-          label="Costo usado"
-          value={formatDop(usage.totals.total)}
-          empty="Aún no hay costos de uso."
-          breakdown={usage.rows
+          label="Costo acumulado"
+          value={formatDop(
+            [...new Set(lots.map((item) => item.sourceCepaId))].reduce(
+              (sum, id) => sum + (sheetById.get(id)?.total ?? 0),
+              0,
+            ),
+          )}
+          empty="Aún no hay costos de lote."
+          breakdown={[...new Set(lots.map((item) => item.sourceCepaId))]
+            .map((id) => sheetById.get(id) ?? emptyCepaCostSheet(id))
             .filter((row) => row.total > 0)
-            .map((row) => ({ key: `use-${row.key}`, name: row.name, value: formatDop(row.total) }))}
+            .map((row) => ({ key: `acc-${row.cepaId}`, name: row.label, value: formatDop(row.total) }))}
         />
       </div>
 
       <h3 className="font-display mb-3 text-2xl">Salas</h3>
       {byRoom.length === 0 ? (
         <p className="mb-8 text-[var(--muted)]">
-          Añade las salas o habitaciones en{' '}
+          Añade las salas de engorde en{' '}
           <Link className="font-semibold underline" to="/ajustes">
             Ajustes
           </Link>
@@ -283,11 +350,37 @@ export default function EngordePage() {
                   </p>
                 )}
                 {(() => {
-                  const used = usage.rows.find((item) => item.key === row.id)
-                  return used && used.total > 0 ? (
+                  const cepaIds = [
+                    ...new Set(
+                      lots
+                        .filter((item) => {
+                          const catalog =
+                            rooms.find((loc) => loc.id === item.locationId) ??
+                            rooms.find(
+                              (loc) => loc.name.trim().toLowerCase() === item.location.trim().toLowerCase(),
+                            )
+                          return (catalog?.id || item.locationId || item.location.trim()) === row.id
+                        })
+                        .map((item) => item.sourceCepaId),
+                    ),
+                  ]
+                  const used = cepaIds.reduce(
+                    (acc, id) => {
+                      const sheet = sheetById.get(id)
+                      return {
+                        feed: acc.feed + (sheet?.engordeFeedCost ?? 0),
+                        pharmacy: acc.pharmacy + (sheet?.engordePharmacyCost ?? 0),
+                        total: acc.total + (sheet?.total ?? 0),
+                      }
+                    },
+                    { feed: 0, pharmacy: 0, total: 0 },
+                  )
+                  return used.total > 0 || used.feed + used.pharmacy > 0 ? (
                     <p className="mt-2 text-xs text-[var(--muted)]">
-                      Usado {formatDop(used.total)} · alimento {formatDop(used.feedCost)} · farmacia{' '}
-                      {formatDop(used.pharmacyCost)}
+                      Acumulado {formatDop(used.total)}
+                      {used.feed + used.pharmacy > 0
+                        ? ` · engorde alimento ${formatDop(used.feed)} · farmacia ${formatDop(used.pharmacy)}`
+                        : ''}
                     </p>
                   ) : null
                 })()}
@@ -368,11 +461,15 @@ export default function EngordePage() {
                     <th className="pb-2 font-semibold">Edad al pasar</th>
                     <th className="pb-2 font-semibold">Peso</th>
                     <th className="pb-2 font-semibold">Prom. / cerdo</th>
+                    <th className="pb-2 font-semibold">Acumulado</th>
                     <th className="pb-2 font-semibold" />
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleRows.map((row) => (
+                  {visibleRows.map((row) => {
+                    const live = engordeLotLiveOnDate(row, deaths)
+                    const dead = engordeDeathsUpTo(deaths, row.id)
+                    return (
                     <tr key={row.id} className="border-t border-[var(--line)]">
                       <td className="py-3">{row.date}</td>
                       <td className="py-3">
@@ -380,12 +477,31 @@ export default function EngordePage() {
                         <span className="mt-0.5 block text-xs text-[var(--muted)]">{row.sourceSupplierName}</span>
                       </td>
                       <td className="py-3">{row.location}</td>
-                      <td className="py-3">{row.pigCount}</td>
+                      <td className="py-3">
+                        {live}
+                        <span className="mt-0.5 block text-xs text-[var(--muted)]">
+                          {row.pigCount} trasladados
+                          {dead > 0 ? ` · ${dead} muertos` : ''}
+                        </span>
+                      </td>
                       <td className="py-3">{formatAgeDays(row.arrivalAgeDays)}</td>
                       <td className="py-3">{formatKg(row.totalWeightKg)} kg</td>
                       <td className="py-3">{formatKg(row.avgWeightKg)} kg</td>
                       <td className="py-3">
+                        {formatDop((sheetById.get(row.sourceCepaId) ?? emptyCepaCostSheet(row.sourceCepaId)).total)}
+                      </td>
+                      <td className="py-3">
                         <div className="flex justify-end gap-1">
+                          <IconButton
+                            label="Registrar muerte"
+                            onClick={() => {
+                              setEditingDeath(null)
+                              setDeathLot(row)
+                              setDeathOpen(true)
+                            }}
+                          >
+                            <DeathIcon />
+                          </IconButton>
                           <IconButton
                             label="Editar"
                             onClick={() => {
@@ -401,7 +517,8 @@ export default function EngordePage() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-[var(--line)]">
@@ -413,9 +530,10 @@ export default function EngordePage() {
                     <td className="py-3 font-semibold">{formatKg(totals.kg)} kg</td>
                     <td className="py-3" />
                     <td className="py-3" />
+                    <td className="py-3" />
                   </tr>
                   <tr>
-                    <td className="pb-1 text-xs text-[var(--muted)]" colSpan={8}>
+                    <td className="pb-1 text-xs text-[var(--muted)]" colSpan={9}>
                       {visibleRows.length} {visibleRows.length === 1 ? 'traslado' : 'traslados'}
                     </td>
                   </tr>
@@ -426,11 +544,35 @@ export default function EngordePage() {
         )}
       </div>
 
+      {deathOpen && (
+        <DeathForm
+          key={`${editingDeath?.id ?? 'new'}:${deathLot?.id ?? 'none'}`}
+          stage="engorde"
+          cepas={state.cepas}
+          lots={lots}
+          deaths={deaths}
+          initialLot={deathLot}
+          initialDeath={editingDeath}
+          onClose={() => {
+            setDeathOpen(false)
+            setDeathLot(null)
+            setEditingDeath(null)
+          }}
+          onSave={(input) => (editingDeath ? updateDeath(editingDeath.id, input) : addDeath(input))}
+          onEditDeath={(item) => {
+            const lot = lots.find((row) => row.id === item.lotId) ?? null
+            setDeathLot(lot)
+            setEditingDeath(item)
+          }}
+          onDeleteDeath={deleteDeath}
+        />
+      )}
+
       {feedOpen && (
         <FeedUseForm
           title={editingFeedUse ? 'Editar alimentación' : 'Alimentar engorde'}
           stage="engorde"
-          locations={rooms}
+          groups={engordeCostGroups(state.cepas, lots)}
           initial={editingFeedUse}
           onClose={() => {
             setFeedOpen(false)
@@ -443,7 +585,7 @@ export default function EngordePage() {
         <Modal title="Eliminar alimentación" onClose={() => setRemovingFeedUse(null)}>
           <p className="text-[var(--muted)]">
             ¿Quitar {removingFeedUse.feedName} del {removingFeedUse.date}? El inventario de alimento vuelve a
-            contar esos QQ.
+            contar esos kilos.
           </p>
           <div className="mt-4 flex flex-wrap justify-end gap-2">
             <button className="btn btn-ghost" type="button" onClick={() => setRemovingFeedUse(null)}>
@@ -469,6 +611,7 @@ export default function EngordePage() {
           cepas={state.cepas}
           deaths={state.deaths ?? []}
           weighings={state.weighings ?? []}
+          desteteRooms={desteteRooms}
           rooms={rooms}
           lots={lots}
           initial={editing}
@@ -517,6 +660,7 @@ function TransferForm({
   cepas,
   deaths,
   weighings,
+  desteteRooms,
   rooms,
   lots,
   initial,
@@ -527,6 +671,7 @@ function TransferForm({
   cepas: Cepa[]
   deaths: CepaDeath[]
   weighings: CepaWeighing[]
+  desteteRooms: CepaLocation[]
   rooms: CepaLocation[]
   lots: EngordeLot[]
   initial: EngordeLot | null
@@ -536,7 +681,10 @@ function TransferForm({
   const transfers = engordeLotsAsMovements(lots)
   const ordered = [...cepas].sort((a, b) => b.date.localeCompare(a.date) || a.location.localeCompare(b.location, 'es'))
   const [date, setDate] = useState(initial?.date ?? todayIso())
-  const [sourceCepaId, setSourceCepaId] = useState(initial?.sourceCepaId ?? ordered[0]?.id ?? '')
+  const initialCepa = cepas.find((item) => item.id === initial?.sourceCepaId) ?? ordered[0] ?? null
+  const [originLocationId, setOriginLocationId] = useState(initialCepa?.locationId ?? desteteRooms[0]?.id ?? '')
+  const cepasInOrigin = ordered.filter((row) => (originLocationId ? row.locationId === originLocationId : true))
+  const [sourceCepaId, setSourceCepaId] = useState(initial?.sourceCepaId ?? cepasInOrigin[0]?.id ?? '')
   const cepa = cepas.find((item) => item.id === sourceCepaId) ?? null
   const live = cepa ? cepaLiveOnDate(cepa, deaths, date, undefined, transfers, initial?.id) : 0
   const [placements, setPlacements] = useState(() =>
@@ -558,9 +706,11 @@ function TransferForm({
     if (!row.locationId || heads <= 0) return []
     const location = rooms.find((item) => item.id === row.locationId)
     if (!location?.capacity) return []
-    const current = engordeLocationLiveCount(row.locationId, lots)
-    const already = initial && initial.locationId === row.locationId ? initial.pigCount : 0
-    const projected = current - already + heads
+    const current = engordeLocationLiveCount(row.locationId, lots, deaths)
+    const already = initial && initial.locationId === row.locationId ? engordeLotLiveOnDate(initial, deaths) : 0
+    const deadOnLot = initial && initial.locationId === row.locationId ? engordeDeathsUpTo(deaths, initial.id) : 0
+    const placedLive = Math.max(0, heads - deadOnLot)
+    const projected = current - already + placedLive
     return projected > location.capacity
       ? [`${location.name}: ${projected} cerdos / ${location.capacity} de capacidad`]
       : []
@@ -568,10 +718,20 @@ function TransferForm({
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    if (desteteRooms.length === 0 || rooms.length === 0) {
+      setSaved(false)
+      setError('Crea la jaula de destete y la sala de engorde en Ajustes. El traslado no crea salas nuevas.')
+      return
+    }
     const filled = placements.filter((row) => row.locationId && (Number.parseInt(row.pigCount, 10) || 0) > 0)
     if (filled.length === 0) {
       setSaved(false)
-      setError('Indica al menos una sala con cerdos.')
+      setError('Indica al menos una sala de engorde con cerdos.')
+      return
+    }
+    if (filled.some((row) => row.locationId === originLocationId)) {
+      setSaved(false)
+      setError('La sala de destino tiene que ser distinta a la jaula de destete de origen.')
       return
     }
     const heads = filled.map((row) => Number.parseInt(row.pigCount, 10))
@@ -610,6 +770,28 @@ function TransferForm({
           <input className="field" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
         </label>
         <label>
+          <span className="label">Sala de origen (destete)</span>
+          <select
+            className="field"
+            value={originLocationId}
+            onChange={(e) => {
+              const nextOrigin = e.target.value
+              setOriginLocationId(nextOrigin)
+              const nextCepa = ordered.find((row) => row.locationId === nextOrigin)
+              setSourceCepaId(nextCepa?.id ?? '')
+            }}
+            required
+            disabled={Boolean(initial)}
+          >
+            <option value="">Elegir jaula de destete</option>
+            {desteteRooms.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
           <span className="label">Cepa de destete</span>
           <select
             className="field"
@@ -618,11 +800,11 @@ function TransferForm({
             required
             disabled={Boolean(initial)}
           >
-            {ordered.map((row) => {
+            {cepasInOrigin.map((row) => {
               const remaining = cepaLiveOnDate(row, deaths, date, undefined, transfers, initial?.id)
               return (
                 <option key={row.id} value={row.id}>
-                  {row.date} · {row.location} · {row.supplierName} · {remaining} vivos
+                  {row.date} · {row.supplierName} · {remaining} vivos
                 </option>
               )
             })}
@@ -633,20 +815,25 @@ function TransferForm({
               {age ? ` · edad ${formatAgeDays(age.ageDays)}` : ''}.
             </span>
           )}
+          {originLocationId && cepasInOrigin.length === 0 && (
+            <span className="mt-1 block text-xs text-[var(--danger)]">No hay cepas en esa jaula de destete.</span>
+          )}
         </label>
         <div>
-          <span className="label">Salas de engorde</span>
+          <span className="label">Sala de destino (engorde)</span>
           <p className="mb-2 text-xs text-[var(--muted)]">
-            Reparte los cerdos en una o varias jaulas
-            {rooms.length === 0 ? '. Créalas en Ajustes si aún no aparecen.' : '.'}
+            Elige una sala de engorde ya creada. Puedes repartir a varias, pero todas tienen que existir
+            en Ajustes.
           </p>
           <div className="grid gap-2">
             {placements.map((row, index) => {
               const location = rooms.find((item) => item.id === row.locationId)
               const heads = counts[index]
-              const current = row.locationId ? engordeLocationLiveCount(row.locationId, lots) : 0
-              const already = initial && initial.locationId === row.locationId ? initial.pigCount : 0
-              const projected = current - already + heads
+              const current = row.locationId ? engordeLocationLiveCount(row.locationId, lots, deaths) : 0
+              const already = initial && initial.locationId === row.locationId ? engordeLotLiveOnDate(initial, deaths) : 0
+              const deadOnLot = initial && initial.locationId === row.locationId ? engordeDeathsUpTo(deaths, initial.id) : 0
+              const placedLive = Math.max(0, heads - deadOnLot)
+              const projected = current - already + placedLive
               const over = Boolean(location?.capacity && projected > location.capacity)
               return (
                 <div key={row.key} className="grid gap-2 rounded-2xl border border-[var(--line)] p-3 sm:grid-cols-[1fr_8rem_auto]">
@@ -660,9 +847,9 @@ function TransferForm({
                     }
                     required
                   >
-                    <option value="">Elegir sala</option>
+                    <option value="">Elegir sala de engorde</option>
                     {rooms.map((item) => (
-                      <option key={item.id} value={item.id}>
+                      <option key={item.id} value={item.id} disabled={item.id === originLocationId}>
                         {item.name}
                         {item.capacity > 0 ? ` (${item.capacity})` : ''}
                       </option>
@@ -710,7 +897,7 @@ function TransferForm({
                 setPlacements((rows) => [...rows, { key: uid(), locationId: rooms[0]?.id ?? '', pigCount: '' }])
               }
             >
-              Añadir otra sala
+              Añadir otra sala de engorde
             </button>
           )}
         </div>
@@ -743,16 +930,29 @@ function TransferForm({
         )}
         {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
-        {rooms.length === 0 && (
+        {desteteRooms.length === 0 && (
           <p className="text-sm text-[var(--danger)]">
-            Crea al menos una sala de engorde en{' '}
+            Crea al menos una jaula de destete en{' '}
             <Link className="font-semibold underline" to="/ajustes">
               Ajustes
             </Link>
             .
           </p>
         )}
-        <button className="btn btn-primary" disabled={rooms.length === 0 || !sourceCepaId} type="submit">
+        {rooms.length === 0 && (
+          <p className="text-sm text-[var(--danger)]">
+            Crea al menos una sala de engorde en{' '}
+            <Link className="font-semibold underline" to="/ajustes">
+              Ajustes
+            </Link>
+            . El traslado no crea salas nuevas.
+          </p>
+        )}
+        <button
+          className="btn btn-primary"
+          disabled={desteteRooms.length === 0 || rooms.length === 0 || !sourceCepaId}
+          type="submit"
+        >
           {initial ? 'Guardar cambios' : 'Trasladar'}
         </button>
       </form>
@@ -817,6 +1017,16 @@ function IconButton({
     <button className="btn btn-ghost btn-icon" type="button" aria-label={label} title={label} onClick={onClick}>
       {children}
     </button>
+  )
+}
+
+function DeathIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M12 3v6" />
+      <path d="M8 7h8" />
+      <circle cx="12" cy="16" r="5" />
+    </svg>
   )
 }
 

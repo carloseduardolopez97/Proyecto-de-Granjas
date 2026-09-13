@@ -31,6 +31,7 @@ export const QUICK_ADD_GROUPS: QuickAddGroup[] = [
     items: [
       { id: 'traslado', label: 'Trasladar a engorde', to: '/engorde' },
       { id: 'alimento-engorde', label: 'Alimentar engorde', to: '/engorde' },
+      { id: 'muerte-engorde', label: 'Registrar muerte', to: '/engorde' },
     ],
   },
   {
@@ -40,6 +41,7 @@ export const QUICK_ADD_GROUPS: QuickAddGroup[] = [
   {
     label: 'Ajustes',
     items: [
+      { id: 'suplidor', label: 'Crear suplidor', to: '/ajustes' },
       { id: 'catalogo', label: 'Crear alimento', to: '/ajustes' },
       { id: 'ubicacion', label: 'Crear ubicación destete', to: '/ajustes' },
       { id: 'sala', label: 'Crear sala de engorde', to: '/ajustes' },

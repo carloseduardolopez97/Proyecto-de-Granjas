@@ -5,8 +5,9 @@ import {
   cepaCountUpTo,
   cepaDeathsUpTo,
   cepaLiveOnDate,
+  engordeDeathsUpTo,
+  engordeLotLiveOnDate,
   engordeLotsAsMovements,
-  mergeLocationCatalogs,
   resolveCepaWeighingMass,
   uid,
   usdToPesos,
@@ -22,6 +23,7 @@ import type {
   CepaWeighing,
   CepaWeighMode,
   EngordeLot,
+  FarmStage,
   FeedCurrency,
 } from '../lib/types'
 
@@ -56,6 +58,8 @@ export type CepaDeathInput = {
   date: string
   count: number
   note?: string
+  stage?: FarmStage
+  lotId?: string
 }
 
 export type EngordeLotInput = {
@@ -69,6 +73,8 @@ export type EngordeLotInput = {
 type CepaContextValue = {
   state: CepaState
   addSupplier: (name: string, saleAgeDays?: number) => { error: string } | { id: string }
+  updateSupplier: (id: string, name: string, saleAgeDays?: number) => string | null
+  deleteSupplier: (id: string) => string | null
   addLocation: (name: string, capacity?: number) => { error: string } | { id: string }
   updateLocation: (id: string, name: string, capacity?: number) => string | null
   deleteLocation: (id: string) => string | null
@@ -262,15 +268,44 @@ function parseDeath(
   cepas: Cepa[],
   deaths: CepaDeath[],
   transfers: ReturnType<typeof engordeLotsAsMovements>,
+  lots: EngordeLot[],
   previous?: CepaDeath,
 ): CepaDeath | string {
-  const cepa = cepas.find((item) => item.id === input.cepaId)
-  if (!cepa) return 'Elige la cepa de las muertes.'
+  const stage: FarmStage = input.stage === 'engorde' ? 'engorde' : 'destete'
   if (!input.date) return 'Indica la fecha de la muerte.'
-  if (input.date < cepa.date) return 'La fecha no puede ser anterior a la compra.'
   if (!Number.isInteger(input.count) || input.count <= 0) {
     return 'La cantidad de muertos debe ser un número entero mayor a 0.'
   }
+
+  if (stage === 'engorde') {
+    const lot = lots.find((item) => item.id === input.lotId)
+    if (!lot) return 'Elige el traslado de engorde.'
+    const cepa = cepas.find((item) => item.id === lot.sourceCepaId)
+    if (!cepa) return 'No se encontró la cepa de ese traslado.'
+    if (input.date < lot.date) return 'La fecha no puede ser anterior al traslado.'
+    const live = engordeLotLiveOnDate(lot, deaths, input.date, previous?.id)
+    if (input.count > live) {
+      return `Solo hay ${live} cerdos vivos ese día en ese traslado.`
+    }
+    const age = cepaAgeOnDate(cepa, input.date)
+    const note = input.note?.trim()
+    return {
+      id: previous?.id ?? uid(),
+      cepaId: cepa.id,
+      date: input.date,
+      count: input.count,
+      daysOnFarm: age.daysOnFarm,
+      arrivalAgeDays: age.arrivalAgeDays,
+      ageDays: age.ageDays,
+      note: note || undefined,
+      stage: 'engorde',
+      lotId: lot.id,
+    }
+  }
+
+  const cepa = cepas.find((item) => item.id === input.cepaId)
+  if (!cepa) return 'Elige la cepa de las muertes.'
+  if (input.date < cepa.date) return 'La fecha no puede ser anterior a la compra.'
   const live = cepaLiveOnDate(cepa, deaths, input.date, previous?.id, transfers)
   if (input.count > live) {
     return `Solo hay ${live} lechones vivos ese día.`
@@ -286,6 +321,7 @@ function parseDeath(
     arrivalAgeDays: age.arrivalAgeDays,
     ageDays: age.ageDays,
     note: note || undefined,
+    stage: 'destete',
   }
 }
 
@@ -302,7 +338,10 @@ function parseEngordeLot(
   if (!input.date) return 'Indica la fecha del traslado.'
   if (input.date < cepa.date) return 'La fecha no puede ser anterior a la compra de destete.'
   const location = locations.find((item) => item.id === input.locationId)
-  if (!location) return 'Elige una sala de engorde o créala en Ajustes.'
+  if (!location) return 'Elige una sala de engorde ya creada en Ajustes. El traslado no crea salas nuevas.'
+  if (location.id === cepa.locationId) {
+    return 'La sala de destino tiene que ser distinta a la jaula de destete de origen.'
+  }
   if (!Number.isInteger(input.pigCount) || input.pigCount <= 0) {
     return 'La cantidad de cerdos debe ser un número entero mayor a 0.'
   }
@@ -310,6 +349,12 @@ function parseEngordeLot(
   const live = cepaLiveOnDate(cepa, deaths, input.date, undefined, transfers, previous?.id)
   if (input.pigCount > live) {
     return `En destete solo quedan ${live} lechones vivos ese día.`
+  }
+  if (previous) {
+    const deadOnLot = engordeDeathsUpTo(deaths, previous.id)
+    if (input.pigCount < deadOnLot) {
+      return `Este traslado ya tiene ${deadOnLot} muertos. No puedes dejar menos cerdos que los muertos registrados.`
+    }
   }
   if (!(input.totalWeightKg > 0)) return 'El peso total al traslado debe ser mayor a 0.'
   const age = cepaAgeOnDate(cepa, input.date)
@@ -355,6 +400,28 @@ export function CepaProvider({ children }: { children: ReactNode }) {
       }
     })
     return { id: parsed.id }
+  }, [])
+
+  const updateSupplier = useCallback((id: string, name: string, saleAgeDays?: number): string | null => {
+    const parsed = parseSupplier(name, saleAgeDays, stateRef.current.suppliers, id)
+    if (typeof parsed === 'string') return parsed
+    setState((s) => ({
+      ...s,
+      suppliers: s.suppliers
+        .map((item) => (item.id === id ? parsed : item))
+        .sort((a, b) => a.name.localeCompare(b.name, 'es')),
+    }))
+    return null
+  }, [])
+
+  const deleteSupplier = useCallback((id: string): string | null => {
+    const used = stateRef.current.cepas.some((item) => item.supplierId === id)
+    if (used) return 'No se puede eliminar: hay cepas registradas de ese suplidor. Puedes editarlo.'
+    setState((s) => ({
+      ...s,
+      suppliers: s.suppliers.filter((item) => item.id !== id),
+    }))
+    return null
   }, [])
 
   const addLocation = useCallback((name: string, capacity?: number): { error: string } | { id: string } => {
@@ -547,6 +614,7 @@ export function CepaProvider({ children }: { children: ReactNode }) {
       stateRef.current.cepas,
       stateRef.current.deaths ?? [],
       transfersOf(stateRef.current),
+      stateRef.current.engordeLots ?? [],
     )
     if (typeof parsed === 'string') return parsed
     setState((s) => {
@@ -564,6 +632,7 @@ export function CepaProvider({ children }: { children: ReactNode }) {
       stateRef.current.cepas,
       stateRef.current.deaths ?? [],
       transfersOf(stateRef.current),
+      stateRef.current.engordeLots ?? [],
       current,
     )
     if (typeof parsed === 'string') return parsed
@@ -592,7 +661,7 @@ export function CepaProvider({ children }: { children: ReactNode }) {
         input,
         stateRef.current.cepas,
         stateRef.current.deaths ?? [],
-        mergeLocationCatalogs(stateRef.current.locations ?? [], stateRef.current.engordeLocations ?? []),
+        stateRef.current.engordeLocations ?? [],
         pending,
       )
       if (typeof parsed === 'string') return parsed
@@ -615,7 +684,7 @@ export function CepaProvider({ children }: { children: ReactNode }) {
       input,
       stateRef.current.cepas,
       stateRef.current.deaths ?? [],
-      mergeLocationCatalogs(stateRef.current.locations ?? [], stateRef.current.engordeLocations ?? []),
+      stateRef.current.engordeLocations ?? [],
       stateRef.current.engordeLots ?? [],
       current,
     )
@@ -628,7 +697,11 @@ export function CepaProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const deleteEngordeLot = useCallback((id: string) => {
-    setState((s) => ({ ...s, engordeLots: (s.engordeLots ?? []).filter((item) => item.id !== id) }))
+    setState((s) => ({
+      ...s,
+      engordeLots: (s.engordeLots ?? []).filter((item) => item.id !== id),
+      deaths: (s.deaths ?? []).filter((item) => item.lotId !== id),
+    }))
   }, [])
 
   return (
@@ -636,6 +709,8 @@ export function CepaProvider({ children }: { children: ReactNode }) {
       value={{
         state,
         addSupplier,
+        updateSupplier,
+        deleteSupplier,
         addLocation,
         updateLocation,
         deleteLocation,

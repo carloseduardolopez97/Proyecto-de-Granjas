@@ -9,6 +9,7 @@ import type {
   FarmStage,
   FeedProduct,
   FeedPurchase,
+  FeedQtyMode,
   FeedStorage,
   FeedUse,
   Injection,
@@ -163,13 +164,45 @@ export function cepaCountUpTo(
   }, 0)
 }
 
+export function deathStage(item: { stage?: FarmStage }): FarmStage {
+  return item.stage === 'engorde' ? 'engorde' : 'destete'
+}
+
 export function cepaDeathsUpTo(
-  deaths: Array<{ id?: string; cepaId: string; date: string; count: number }>,
+  deaths: Array<{ id?: string; cepaId: string; date: string; count: number; stage?: FarmStage }>,
   cepaId: string,
   date?: string,
   exceptId?: string,
 ): number {
-  return cepaCountUpTo(deaths, cepaId, date, exceptId)
+  return cepaCountUpTo(
+    deaths.filter((item) => deathStage(item) === 'destete'),
+    cepaId,
+    date,
+    exceptId,
+  )
+}
+
+export function engordeDeathsUpTo(
+  deaths: Array<{ id?: string; lotId?: string; date: string; count: number; stage?: FarmStage }>,
+  lotId: string,
+  date?: string,
+  exceptId?: string,
+): number {
+  return deaths.reduce((sum, item) => {
+    if (deathStage(item) !== 'engorde' || item.lotId !== lotId) return sum
+    if (exceptId && item.id === exceptId) return sum
+    if (date && item.date > date) return sum
+    return sum + (item.count || 0)
+  }, 0)
+}
+
+export function engordeLotLiveOnDate(
+  lot: { id: string; pigCount: number },
+  deaths: Array<{ id?: string; lotId?: string; date: string; count: number; stage?: FarmStage }>,
+  date?: string,
+  exceptId?: string,
+): number {
+  return Math.max(0, lot.pigCount - engordeDeathsUpTo(deaths, lot.id, date, exceptId))
 }
 
 export function engordeLotsAsMovements(
@@ -222,9 +255,12 @@ export function mergeLocationCatalogs(...lists: Array<Array<{ id: string; name: 
 
 export function engordeLocationLiveCount(
   locationId: string,
-  lots: Array<{ locationId: string; pigCount: number }>,
+  lots: Array<{ id: string; locationId: string; pigCount: number }>,
+  deaths: Array<{ id?: string; lotId?: string; date: string; count: number; stage?: FarmStage }> = [],
 ): number {
-  return lots.filter((item) => item.locationId === locationId).reduce((sum, item) => sum + item.pigCount, 0)
+  return lots
+    .filter((item) => item.locationId === locationId)
+    .reduce((sum, item) => sum + engordeLotLiveOnDate(item, deaths), 0)
 }
 
 export function feedStorageLabel(storage: FeedStorage): string {
@@ -235,13 +271,55 @@ export function normalizeFeedStorage(value?: string): FeedStorage {
   return value === 'silo' ? 'silo' : 'saco'
 }
 
+export function feedKgFromSacks(sacks: number, sackWeightKg: number): number {
+  return Number((sacks * sackWeightKg).toFixed(4))
+}
+
+export function kgPriceToPerSack(pricePerKg: number, sackWeightKg: number): number {
+  return Number((pricePerKg * sackWeightKg).toFixed(6))
+}
+
+export function sackPriceToPerKg(pricePerSack: number, sackWeightKg: number): number {
+  if (!(sackWeightKg > 0)) return 0
+  return Number((pricePerSack / sackWeightKg).toFixed(6))
+}
+
+export function normalizeSackWeightKg(value?: number): number | undefined {
+  if (!(value && value > 0)) return undefined
+  return Number(value.toFixed(4))
+}
+
+export function formatFeedPurchaseQty(row: Pick<FeedPurchase, 'quantityKg' | 'sackCount' | 'sackWeightKg'>): string {
+  if (row.sackCount && row.sackWeightKg) {
+    return `${formatKg(row.sackCount)} sacos (${formatKg(row.sackWeightKg)} kg) · ${formatKg(row.quantityKg)} kg`
+  }
+  return `${formatKg(row.quantityKg)} kg`
+}
+
+export function convertDisplayedFeedPrice(
+  current: { price: string; usdAmount: string },
+  from: FeedQtyMode,
+  to: FeedQtyMode,
+  sackWeightKg: number,
+): { price: string; usdAmount: string } {
+  if (from === to || !(sackWeightKg > 0)) return current
+  const factor = from === 'kg' && to === 'saco' ? sackWeightKg : 1 / sackWeightKg
+  const scale = (value: string) => {
+    if (!value) return value
+    const n = Number(value)
+    if (!(n >= 0)) return value
+    return String(Number((n * factor).toFixed(6)))
+  }
+  return { price: scale(current.price), usdAmount: scale(current.usdAmount) }
+}
+
 export function latestFeedPrice(
   feedId: string,
   purchases: FeedPurchase[],
   products: FeedProduct[],
   date?: string,
   storage?: FeedStorage,
-): { pricePerQq: number; feedName: string } | null {
+): { pricePerKg: number; feedName: string } | null {
   const product = products.find((item) => item.id === feedId)
   const eligible = purchases
     .filter(
@@ -252,33 +330,33 @@ export function latestFeedPrice(
     )
     .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id))
   const purchase = eligible[0]
-  if (purchase) return { pricePerQq: purchase.pricePerQq, feedName: purchase.feedName }
+  if (purchase) return { pricePerKg: purchase.pricePerKg, feedName: purchase.feedName }
   if (storage) {
     const anyStorage = latestFeedPrice(feedId, purchases, products, date)
     if (anyStorage) return anyStorage
   }
-  if (product) return { pricePerQq: product.pricePerQq, feedName: product.name }
+  if (product) return { pricePerKg: product.pricePerKg, feedName: product.name }
   return null
 }
 
-export function feedPurchasedQq(purchases: FeedPurchase[], feedId?: string, storage?: FeedStorage): number {
+export function feedPurchasedKg(purchases: FeedPurchase[], feedId?: string, storage?: FeedStorage): number {
   return purchases.reduce((sum, item) => {
     if (feedId && item.feedId !== feedId) return sum
     if (storage && item.storage !== storage) return sum
-    return sum + (item.quantityQq || 0)
+    return sum + (item.quantityKg || 0)
   }, 0)
 }
 
-export function feedUsedQq(uses: FeedUse[], feedId?: string, exceptId?: string, storage?: FeedStorage): number {
+export function feedUsedKg(uses: FeedUse[], feedId?: string, exceptId?: string, storage?: FeedStorage): number {
   return uses.reduce((sum, item) => {
     if (exceptId && item.id === exceptId) return sum
     if (feedId && item.feedId !== feedId) return sum
     if (storage && item.storage !== storage) return sum
-    return sum + (item.quantityQq || 0)
+    return sum + (item.quantityKg || 0)
   }, 0)
 }
 
-export function feedAvailableQq(
+export function feedAvailableKg(
   purchases: FeedPurchase[],
   uses: FeedUse[],
   feedId: string,
@@ -286,7 +364,7 @@ export function feedAvailableQq(
   storage?: FeedStorage,
 ): number {
   return Number(
-    (feedPurchasedQq(purchases, feedId, storage) - feedUsedQq(uses, feedId, exceptUseId, storage)).toFixed(4),
+    (feedPurchasedKg(purchases, feedId, storage) - feedUsedKg(uses, feedId, exceptUseId, storage)).toFixed(4),
   )
 }
 
@@ -326,14 +404,14 @@ export function stageUsageCosts(input: {
   for (const use of input.feedUses) {
     if (use.stage !== input.stage) continue
     const cost = use.cost || 0
-    const allocations = (use.allocations ?? []).filter((item) => item.locationId && item.quantityQq > 0)
+    const allocations = (use.allocations ?? []).filter((item) => item.locationId && item.quantityKg > 0)
     if (allocations.length === 0) {
       general.feedCost += cost
       continue
     }
-    const heads = allocations.reduce((sum, item) => sum + item.quantityQq, 0)
+    const heads = allocations.reduce((sum, item) => sum + item.quantityKg, 0)
     for (const item of allocations) {
-      const share = heads > 0 ? cost * (item.quantityQq / heads) : 0
+      const share = heads > 0 ? cost * (item.quantityKg / heads) : 0
       bucket(item.locationId).feedCost += share
     }
   }
@@ -370,6 +448,189 @@ export function stageUsageCosts(input: {
     { key: 'total', name: 'Total', feedCost: 0, pharmacyCost: 0, total: 0 },
   )
   return { rows, totals }
+}
+
+export type CostGroup = {
+  id: string
+  label: string
+  locationId: string
+  location: string
+}
+
+export function cepaGroupLabel(cepa: { date: string; supplierName: string; location: string }): string {
+  return `${cepa.date} · ${cepa.supplierName} · ${cepa.location}`
+}
+
+export function desteteCostGroups(cepas: Cepa[]): CostGroup[] {
+  return [...cepas]
+    .sort((a, b) => b.date.localeCompare(a.date) || a.location.localeCompare(b.location, 'es'))
+    .map((cepa) => ({
+      id: cepa.id,
+      label: cepaGroupLabel(cepa),
+      locationId: cepa.locationId,
+      location: cepa.location,
+    }))
+}
+
+export function engordeCostGroups(cepas: Cepa[], lots: EngordeLot[]): CostGroup[] {
+  const roomsByCepa = new Map<string, { locationId: string; names: string[] }>()
+  for (const lot of lots) {
+    const current = roomsByCepa.get(lot.sourceCepaId) ?? { locationId: lot.locationId, names: [] }
+    if (lot.location && !current.names.includes(lot.location)) current.names.push(lot.location)
+    if (!current.locationId) current.locationId = lot.locationId
+    roomsByCepa.set(lot.sourceCepaId, current)
+  }
+  return cepas
+    .filter((cepa) => roomsByCepa.has(cepa.id))
+    .sort((a, b) => b.date.localeCompare(a.date) || a.supplierName.localeCompare(b.supplierName, 'es'))
+    .map((cepa) => {
+      const rooms = roomsByCepa.get(cepa.id)
+      const location = rooms?.names.join(', ') || cepa.location
+      return {
+        id: cepa.id,
+        label: `${cepa.date} · ${cepa.supplierName} · ${location}`,
+        locationId: rooms?.locationId || cepa.locationId,
+        location,
+      }
+    })
+}
+
+export type CepaCostSheet = {
+  cepaId: string
+  label: string
+  purchaseCost: number
+  desteteFeedCost: number
+  destetePharmacyCost: number
+  engordeFeedCost: number
+  engordePharmacyCost: number
+  feedCost: number
+  pharmacyCost: number
+  usedCost: number
+  total: number
+}
+
+function guessCepaId(
+  stage: FarmStage,
+  locationId: string | undefined,
+  cepas: Cepa[],
+  lots: EngordeLot[],
+): string | undefined {
+  if (!locationId) return undefined
+  if (stage === 'engorde') {
+    const ids = [...new Set(lots.filter((item) => item.locationId === locationId).map((item) => item.sourceCepaId))]
+    return ids.length === 1 ? ids[0] : undefined
+  }
+  const ids = cepas.filter((item) => item.locationId === locationId).map((item) => item.id)
+  return ids.length === 1 ? ids[0] : undefined
+}
+
+export function cepaCostSheets(input: {
+  cepas: Cepa[]
+  lots?: EngordeLot[]
+  feedUses: FeedUse[]
+  injectionUses: InjectionUse[]
+}): { sheets: CepaCostSheet[]; unassigned: { feedCost: number; pharmacyCost: number } } {
+  const lots = input.lots ?? []
+  const byId = new Map<string, CepaCostSheet>()
+  for (const cepa of input.cepas) {
+    const purchaseCost = cepaTotalCost(cepa)
+    byId.set(cepa.id, {
+      cepaId: cepa.id,
+      label: cepaGroupLabel(cepa),
+      purchaseCost,
+      desteteFeedCost: 0,
+      destetePharmacyCost: 0,
+      engordeFeedCost: 0,
+      engordePharmacyCost: 0,
+      feedCost: 0,
+      pharmacyCost: 0,
+      usedCost: 0,
+      total: purchaseCost,
+    })
+  }
+  const unassigned = { feedCost: 0, pharmacyCost: 0 }
+
+  function addFeed(cepaId: string, stage: FarmStage, amount: number) {
+    const row = byId.get(cepaId)
+    if (!row) {
+      unassigned.feedCost += amount
+      return
+    }
+    if (stage === 'engorde') row.engordeFeedCost += amount
+    else row.desteteFeedCost += amount
+  }
+
+  function addPharmacy(cepaId: string, stage: FarmStage, amount: number) {
+    const row = byId.get(cepaId)
+    if (!row) {
+      unassigned.pharmacyCost += amount
+      return
+    }
+    if (stage === 'engorde') row.engordePharmacyCost += amount
+    else row.destetePharmacyCost += amount
+  }
+
+  for (const use of input.feedUses) {
+    const cost = use.cost || 0
+    const stage = use.stage === 'engorde' ? 'engorde' : 'destete'
+    const parts = (use.allocations ?? [])
+      .map((item) => ({
+        cepaId: item.cepaId || guessCepaId(stage, item.locationId, input.cepas, lots) || '',
+        quantityKg: item.quantityKg,
+      }))
+      .filter((item) => item.cepaId && item.quantityKg > 0)
+    if (parts.length === 0) {
+      unassigned.feedCost += cost
+      continue
+    }
+    const kg = parts.reduce((sum, item) => sum + item.quantityKg, 0)
+    for (const item of parts) {
+      addFeed(item.cepaId, stage, kg > 0 ? cost * (item.quantityKg / kg) : 0)
+    }
+  }
+
+  for (const use of input.injectionUses) {
+    const cost = use.cost || 0
+    const stage = injectionUseStage(use)
+    const parts = (use.allocations ?? [])
+      .map((item) => ({
+        cepaId: item.cepaId || guessCepaId(stage, item.locationId, input.cepas, lots) || '',
+        doses: item.doses,
+      }))
+      .filter((item) => item.cepaId && item.doses > 0)
+    if (parts.length === 0) {
+      unassigned.pharmacyCost += cost
+      continue
+    }
+    const doses = parts.reduce((sum, item) => sum + item.doses, 0)
+    for (const item of parts) {
+      addPharmacy(item.cepaId, stage, doses > 0 ? cost * (item.doses / doses) : 0)
+    }
+  }
+
+  const sheets = [...byId.values()].map((row) => {
+    const feedCost = row.desteteFeedCost + row.engordeFeedCost
+    const pharmacyCost = row.destetePharmacyCost + row.engordePharmacyCost
+    const usedCost = feedCost + pharmacyCost
+    return { ...row, feedCost, pharmacyCost, usedCost, total: row.purchaseCost + usedCost }
+  })
+  return { sheets, unassigned }
+}
+
+export function emptyCepaCostSheet(cepaId: string, label = ''): CepaCostSheet {
+  return {
+    cepaId,
+    label,
+    purchaseCost: 0,
+    desteteFeedCost: 0,
+    destetePharmacyCost: 0,
+    engordeFeedCost: 0,
+    engordePharmacyCost: 0,
+    feedCost: 0,
+    pharmacyCost: 0,
+    usedCost: 0,
+    total: 0,
+  }
 }
 
 export function splitKgByHeads(totalKg: number, counts: number[]): number[] {
@@ -789,13 +1050,19 @@ export function applyInjectionUse(
 export function withUseDefaults(use: InjectionUse): InjectionUse {
   const cost = typeof use.cost === 'number' ? use.cost : 0
   const fromAllocations = (use.allocations ?? []).filter(
-    (item) => item.locationId && item.doses > 0,
+    (item) => item.doses > 0 && (item.cepaId || item.locationId),
   )
   const allocations =
     fromAllocations.length > 0
-      ? fromAllocations
+      ? fromAllocations.map((item) => ({
+          cepaId: item.cepaId ?? '',
+          cepaName: item.cepaName ?? '',
+          doses: item.doses,
+          locationId: item.locationId,
+          location: item.location,
+        }))
       : use.locationId
-        ? [{ locationId: use.locationId, location: use.location ?? '', doses: use.doses }]
+        ? [{ cepaId: '', cepaName: '', locationId: use.locationId, location: use.location ?? '', doses: use.doses }]
         : []
   return { ...use, cost, allocations, injectionName: use.injectionName?.trim() ?? '', stage: injectionUseStage(use) }
 }
@@ -806,9 +1073,12 @@ export function useInjectionLabel(use: InjectionUse, injections: Injection[]): s
 
 export function formatUseAllocations(use: InjectionUse): string {
   const allocations = use.allocations ?? []
-  if (allocations.length === 0) return 'General'
+  if (allocations.length === 0) return 'Sin cepa'
   return allocations
-    .map((item) => (allocations.length > 1 ? `${item.location} (${item.doses})` : item.location))
+    .map((item) => {
+      const name = item.cepaName?.trim() || item.location?.trim() || 'Cepa'
+      return allocations.length > 1 ? `${name} (${item.doses})` : name
+    })
     .join(', ')
 }
 
@@ -825,14 +1095,16 @@ export type StageAction = {
 function feedAction(row: FeedUse): StageAction {
   const place =
     (row.allocations ?? []).length > 0
-      ? (row.allocations ?? []).map((item) => `${item.location} (${formatQq(item.quantityQq)})`).join(', ')
-      : 'General'
+      ? (row.allocations ?? [])
+          .map((item) => `${item.cepaName?.trim() || item.location || 'Cepa'} (${formatKg(item.quantityKg)} kg)`)
+          .join(', ')
+      : 'Sin cepa'
   return {
     id: `alimento-${row.id}`,
     date: row.date,
     kind: 'alimento',
     title: 'Alimentación',
-    detail: `${row.feedName} · ${feedStorageLabel(row.storage)} · ${formatQq(row.quantityQq)} QQ · ${place}`,
+    detail: `${row.feedName} · ${feedStorageLabel(row.storage)} · ${formatKg(row.quantityKg)} kg · ${place}`,
   }
 }
 
@@ -882,6 +1154,7 @@ export function buildStageActions(input: {
       })
     }
     for (const row of input.deaths ?? []) {
+      if (deathStage(row) !== 'destete') continue
       const cepa = cepaById.get(row.cepaId)
       actions.push({
         id: `muerte-${row.id}`,
@@ -908,6 +1181,17 @@ export function buildStageActions(input: {
         kind: 'traslado',
         title: 'Traslado a engorde',
         detail: `${row.sourceLocation} → ${row.location} · ${row.pigCount} cerdos`,
+      })
+    }
+    for (const row of input.deaths ?? []) {
+      if (deathStage(row) !== 'engorde') continue
+      const lot = (input.lots ?? []).find((item) => item.id === row.lotId)
+      actions.push({
+        id: `muerte-${row.id}`,
+        date: row.date,
+        kind: 'muerte',
+        title: 'Muerte',
+        detail: `${lot?.location || 'Sala'} · ${row.count} ${row.count === 1 ? 'cerdo' : 'cerdos'}${row.note ? ` · ${row.note}` : ''}`,
       })
     }
   }

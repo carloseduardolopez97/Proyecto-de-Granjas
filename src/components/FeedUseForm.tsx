@@ -1,35 +1,34 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useFeed, type FeedUseInput } from '../context/FeedContext'
-import { feedAvailableQq, feedStorageLabel, formatDop, formatDopUnit, formatQq, latestFeedPrice, todayIso } from '../lib/calc'
-import type { CepaLocation, FarmStage, FeedStorage, FeedUse, FeedUseAllocation } from '../lib/types'
+import { feedAvailableKg, feedStorageLabel, formatDop, formatDopUnit, formatKg, latestFeedPrice, todayIso, uid } from '../lib/calc'
+import type { CostGroup } from '../lib/calc'
+import type { FarmStage, FeedStorage, FeedUse } from '../lib/types'
 import FeedStorageFields from './FeedStorageFields'
 import Modal, { afterSaveReadyForNext, SavedNotice } from './Modal'
 
-function cageRows(locations: CepaLocation[], allocations: FeedUseAllocation[]) {
-  const byId = new Map(allocations.map((item) => [item.locationId, item]))
-  const rows = locations.map((item) => ({
-    key: item.id,
-    locationId: item.id,
-    quantity: byId.has(item.id) ? String(byId.get(item.id)?.quantityQq) : '',
-  }))
-  for (const item of allocations) {
-    if (rows.some((row) => row.locationId === item.locationId)) continue
-    rows.push({ key: item.locationId, locationId: item.locationId, quantity: String(item.quantityQq) })
+function cepaRows(groups: CostGroup[], allocations: FeedUse['allocations']) {
+  const assigned = (allocations ?? []).filter((item) => item.cepaId && item.quantityKg > 0)
+  if (assigned.length === 0) {
+    return [{ key: uid(), cepaId: groups[0]?.id ?? '', quantity: '' }]
   }
-  return rows
+  return assigned.map((item) => ({
+    key: uid(),
+    cepaId: item.cepaId,
+    quantity: String(item.quantityKg),
+  }))
 }
 
 export default function FeedUseForm({
   title,
   stage,
-  locations,
+  groups,
   initial,
   onClose,
 }: {
   title: string
   stage: FarmStage
-  locations: CepaLocation[]
+  groups: CostGroup[]
   initial: FeedUse | null
   onClose: () => void
 }) {
@@ -38,51 +37,49 @@ export default function FeedUseForm({
   const [date, setDate] = useState(initial?.date ?? todayIso())
   const [feedId, setFeedId] = useState(initial?.feedId ?? products[0]?.id ?? '')
   const [storage, setStorage] = useState<FeedStorage>(initial?.storage ?? 'saco')
-  const [quantity, setQuantity] = useState(initial && (initial.allocations ?? []).length === 0 ? String(initial.quantityQq) : '')
-  const [byCage, setByCage] = useState((initial?.allocations ?? []).length > 0)
-  const [sameQty, setSameQty] = useState('')
-  const [placements, setPlacements] = useState(() => cageRows(locations, initial?.allocations ?? []))
+  const [placements, setPlacements] = useState(() => cepaRows(groups, initial?.allocations))
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-  const placed = placements.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0)
-  const filledCages = placements.filter((row) => row.locationId && (Number(row.quantity) || 0) > 0).length
-  const qty = byCage ? placed : Number(quantity) || 0
+  const qty = placements.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0)
+  const filledCepas = placements.filter((row) => row.cepaId && (Number(row.quantity) || 0) > 0).length
   const priced = feedId ? latestFeedPrice(feedId, state.purchases, products, date, storage) : null
+  const selected = products.find((item) => item.id === feedId)
+  const sackWeightKg = selected?.sackWeightKg
   const available = feedId
-    ? feedAvailableQq(state.purchases, state.uses ?? [], feedId, initial?.id, storage)
+    ? feedAvailableKg(state.purchases, state.uses ?? [], feedId, initial?.id, storage)
     : 0
-  const pricePerQq =
+  const pricePerKg =
     initial && initial.feedId === feedId && initial.storage === storage
-      ? initial.pricePerQq
-      : priced?.pricePerQq ?? 0
-  const cost = qty * pricePerQq
-
-  function applySameQty() {
-    const amount = Number(sameQty)
-    if (!(amount > 0)) return
-    setPlacements((rows) => rows.map((row) => ({ ...row, quantity: String(amount) })))
-  }
+      ? initial.pricePerKg
+      : priced?.pricePerKg ?? 0
+  const cost = qty * pricePerKg
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    const allocations = byCage
-      ? placements.flatMap((row) => {
-          const amount = Number(row.quantity) || 0
-          if (!row.locationId || amount <= 0) return []
-          const found = locations.find((item) => item.id === row.locationId)
-          return [{ locationId: row.locationId, location: found?.name ?? '', quantityQq: amount }]
-        })
-      : []
-    if (byCage && allocations.length === 0) {
+    const allocations = placements.flatMap((row) => {
+      const amount = Number(row.quantity) || 0
+      if (!row.cepaId || amount <= 0) return []
+      const found = groups.find((item) => item.id === row.cepaId)
+      return [
+        {
+          cepaId: row.cepaId,
+          cepaName: found?.label ?? '',
+          quantityKg: amount,
+          locationId: found?.locationId,
+          location: found?.location,
+        },
+      ]
+    })
+    if (allocations.length === 0) {
       setSaved(false)
-      setError('Indica la cantidad en al menos una jaula.')
+      setError('Elige la cepa que se alimenta e indica los kilos.')
       return
     }
     const input: FeedUseInput = {
       date,
       stage,
       feedId,
-      quantityQq: qty,
+      quantityKg: qty,
       storage,
       allocations,
     }
@@ -96,9 +93,7 @@ export default function FeedUseForm({
       onClose()
       return
     }
-    setQuantity('')
-    setSameQty('')
-    setPlacements(cageRows(locations, []))
+    setPlacements(cepaRows(groups, []))
     setError(null)
     setSaved(true)
     afterSaveReadyForNext(e)
@@ -116,6 +111,13 @@ export default function FeedUseForm({
             .
           </p>
         ) : null}
+        {groups.length === 0 ? (
+          <p className="text-sm text-[var(--danger)]">
+            {stage === 'engorde'
+              ? 'Primero traslada una cepa a engorde para poder alimentarla.'
+              : 'Primero registra una cepa de destete para poder alimentarla.'}
+          </p>
+        ) : null}
         <label>
           <span className="label">Fecha</span>
           <input className="field" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
@@ -131,110 +133,89 @@ export default function FeedUseForm({
           </select>
           {feedId ? (
             <span className="mt-1 block text-xs text-[var(--muted)]">
-              Disponibles {formatQq(available)} QQ {storage === 'silo' ? 'en silo' : 'en sacos'}
-              {pricePerQq > 0 ? ` · ${formatDopUnit(pricePerQq)} / QQ` : ''}
+              Disponibles {formatKg(available)} kg {storage === 'silo' ? 'en silo' : 'en sacos'}
+              {pricePerKg > 0 ? ` · ${formatDopUnit(pricePerKg)} / kg` : ''}
+              {sackWeightKg ? ` · saco de ${formatKg(sackWeightKg)} kg` : ''}
             </span>
           ) : null}
         </label>
         <FeedStorageFields value={storage} onChange={setStorage} />
-        <fieldset>
-          <legend className="label">Asignación</legend>
-          <div className="mt-1 flex flex-wrap gap-2">
-            <label className="btn btn-ghost">
-              <input className="mr-2" type="radio" checked={!byCage} onChange={() => setByCage(false)} />
-              General
-            </label>
-            <label className="btn btn-ghost">
-              <input
-                className="mr-2"
-                type="radio"
-                checked={byCage}
-                onChange={() => {
-                  setByCage(true)
-                  setPlacements((rows) => (rows.length ? rows : cageRows(locations, [])))
-                }}
-              />
-              Varias jaulas
-            </label>
-          </div>
-        </fieldset>
-        {!byCage && (
-          <label>
-            <span className="label">Cantidad usada (QQ)</span>
-            <input
-              className="field"
-              type="number"
-              min={0.01}
-              step="0.01"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              required
-            />
-          </label>
-        )}
-        {byCage && (
-          <div>
-            <p className="mb-2 text-xs text-[var(--muted)]">
-              Pon la cantidad en todas las jaulas que alimentaste. Las vacías no se guardan. El total es la
-              suma.
-            </p>
-            <div className="mb-3 flex flex-wrap items-end gap-2">
-              <label className="min-w-[8rem] flex-1">
-                <span className="label">Misma cantidad en todas (QQ)</span>
+        <div>
+          <span className="label">Cepa</span>
+          <p className="mb-2 text-xs text-[var(--muted)]">
+            El costo queda en ese grupo de lechones, no en la jaula. Si alimentas varios lotes, añade otra cepa.
+          </p>
+          <div className="grid gap-2">
+            {placements.map((row) => (
+              <div
+                key={row.key}
+                className="grid gap-2 rounded-2xl border border-[var(--line)] p-3 sm:grid-cols-[1fr_8rem_auto]"
+              >
+                <select
+                  className="field"
+                  value={row.cepaId}
+                  onChange={(e) =>
+                    setPlacements((rows) =>
+                      rows.map((item) => (item.key === row.key ? { ...item, cepaId: e.target.value } : item)),
+                    )
+                  }
+                  required
+                >
+                  <option value="">Elegir cepa</option>
+                  {groups.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
                 <input
                   className="field"
                   type="number"
                   min={0.01}
                   step="0.01"
-                  value={sameQty}
-                  onChange={(e) => setSameQty(e.target.value)}
-                  placeholder="Ej. 2"
+                  value={row.quantity}
+                  onChange={(e) =>
+                    setPlacements((rows) =>
+                      rows.map((item) => (item.key === row.key ? { ...item, quantity: e.target.value } : item)),
+                    )
+                  }
+                  placeholder="kg"
+                  required
                 />
-              </label>
-              <button className="btn btn-ghost" type="button" onClick={applySameQty}>
-                Aplicar a todas
-              </button>
-            </div>
-            <div className="grid gap-2">
-              {placements.map((row) => {
-                const location = locations.find((item) => item.id === row.locationId)
-                return (
-                  <label
-                    key={row.key}
-                    className="grid grid-cols-[1fr_8rem] items-center gap-2 rounded-2xl border border-[var(--line)] px-3 py-2"
+                {placements.length > 1 ? (
+                  <button
+                    className="btn btn-ghost"
+                    type="button"
+                    onClick={() => setPlacements((rows) => rows.filter((item) => item.key !== row.key))}
                   >
-                    <span className="font-semibold">{location?.name ?? 'Jaula'}</span>
-                    <input
-                      className="field"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={row.quantity}
-                      onChange={(e) =>
-                        setPlacements((rows) =>
-                          rows.map((item) => (item.key === row.key ? { ...item, quantity: e.target.value } : item)),
-                        )
-                      }
-                      placeholder="QQ"
-                    />
-                  </label>
-                )
-              })}
-            </div>
-            {qty > 0 && (
-              <p className="mt-2 text-sm text-[var(--muted)]">
-                {filledCages} {filledCages === 1 ? 'jaula' : 'jaulas'} · {formatQq(qty)} QQ en total
-              </p>
-            )}
+                    Quitar
+                  </button>
+                ) : (
+                  <span />
+                )}
+              </div>
+            ))}
           </div>
-        )}
+          <button
+            className="btn btn-ghost mt-2"
+            type="button"
+            onClick={() =>
+              setPlacements((rows) => [...rows, { key: uid(), cepaId: groups[0]?.id ?? '', quantity: '' }])
+            }
+          >
+            Añadir otra cepa
+          </button>
+          {qty > 0 && (
+            <p className="mt-2 text-sm text-[var(--muted)]">
+              {filledCepas} {filledCepas === 1 ? 'cepa' : 'cepas'} · {formatKg(qty)} kg en total
+              {sackWeightKg ? ` · ${formatKg(qty / sackWeightKg)} sacos` : ''}
+            </p>
+          )}
+        </div>
         {cost > 0 && <p className="text-sm text-[var(--muted)]">Costo de esta ración: {formatDop(cost)}</p>}
         {saved && <SavedNotice />}
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
-        {locations.length === 0 && byCage && (
-          <p className="text-sm text-[var(--danger)]">No hay jaulas para asignar. Créalas en Ajustes.</p>
-        )}
-        <button className="btn btn-primary" disabled={!feedId} type="submit">
+        <button className="btn btn-primary" disabled={!feedId || groups.length === 0} type="submit">
           {initial ? 'Guardar cambios' : 'Registrar alimentación'}
         </button>
       </form>
@@ -263,13 +244,15 @@ export function FeedUseHistory({
         >
           <div>
             <p className="font-semibold">
-              {row.date} · {row.feedName} · {feedStorageLabel(row.storage)} · {formatQq(row.quantityQq)} QQ
+              {row.date} · {row.feedName} · {feedStorageLabel(row.storage)} · {formatKg(row.quantityKg)} kg
             </p>
             <p className="text-sm text-[var(--muted)]">
               {formatDop(row.cost)}
               {(row.allocations ?? []).length > 0
-                ? ` · ${(row.allocations ?? []).map((item) => `${item.location} (${formatQq(item.quantityQq)})`).join(', ')}`
-                : ' · General'}
+                ? ` · ${(row.allocations ?? [])
+                    .map((item) => `${item.cepaName?.trim() || item.location || 'Cepa'} (${formatKg(item.quantityKg)} kg)`)
+                    .join(', ')}`
+                : ' · Sin cepa'}
             </p>
           </div>
           <div className="flex gap-1">

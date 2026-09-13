@@ -36,13 +36,16 @@ export type InjectionLine = {
 export type Injection = {
   id: string
   name: string
+  description?: string
   lines: InjectionLine[]
 }
 
 export type InjectionUseAllocation = {
-  locationId: string
-  location: string
+  cepaId: string
+  cepaName: string
   doses: number
+  locationId?: string
+  location?: string
 }
 
 export type InjectionUse = {
@@ -110,13 +113,19 @@ export const FEED_STORAGES: Array<{ value: FeedStorage; label: string; hint: str
   { value: 'saco', label: 'Sacos', hint: 'Alimento en sacos' },
 ]
 
+export type FeedMassUnit = 'kg'
+
+export type FeedQtyMode = 'kg' | 'saco'
+
 export type FeedProduct = {
   id: string
   name: string
-  pricePerQq: number
+  pricePerKg: number
   priceCurrency: FeedCurrency
   usdAmount?: number
   usdRate?: number
+  /** If set, this feed is typically bought in sacks of this weight. */
+  sackWeightKg?: number
 }
 
 export type FeedPurchase = {
@@ -125,12 +134,14 @@ export type FeedPurchase = {
   feedName: string
   date: string
   invoiceNumber: string
-  quantityQq: number
+  quantityKg: number
   storage: FeedStorage
-  pricePerQq: number
+  pricePerKg: number
   priceCurrency: FeedCurrency
   usdAmount?: number
   usdRate?: number
+  sackCount?: number
+  sackWeightKg?: number
 }
 
 export type FeedState = {
@@ -138,12 +149,16 @@ export type FeedState = {
   purchases: FeedPurchase[]
   uses: FeedUse[]
   lastUsdRate?: number
+  /** Marks stored feed mass and unit prices as kilograms (legacy data used QQ). */
+  feedUnit?: FeedMassUnit
 }
 
 export type FeedUseAllocation = {
-  locationId: string
-  location: string
-  quantityQq: number
+  cepaId: string
+  cepaName: string
+  quantityKg: number
+  locationId?: string
+  location?: string
 }
 
 export type FeedUse = {
@@ -152,9 +167,9 @@ export type FeedUse = {
   stage: FarmStage
   feedId: string
   feedName: string
-  quantityQq: number
+  quantityKg: number
   storage: FeedStorage
-  pricePerQq: number
+  pricePerKg: number
   cost: number
   allocations?: FeedUseAllocation[]
 }
@@ -214,6 +229,8 @@ export type CepaDeath = {
   arrivalAgeDays: number
   ageDays: number
   note?: string
+  stage?: FarmStage
+  lotId?: string
 }
 
 export type EngordeLot = {

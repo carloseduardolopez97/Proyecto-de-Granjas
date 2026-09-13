@@ -21,8 +21,8 @@ type PharmacyContextValue = {
   updateEntry: (id: string, input: NewEntryInput) => string | null
   deleteEntry: (id: string) => void
   deleteMedication: (name: string, unit: StockUnit) => void
-  addInjection: (name: string, lines: InjectionLine[]) => string | null
-  updateInjection: (id: string, name: string, lines: InjectionLine[]) => string | null
+  addInjection: (name: string, lines: InjectionLine[], description?: string) => string | null
+  updateInjection: (id: string, name: string, lines: InjectionLine[], description?: string) => string | null
   deleteInjection: (id: string) => void
   useInjection: (
     injectionId: string,
@@ -48,22 +48,21 @@ function parseAllocations(
   allocations: InjectionUseAllocation[] | null | undefined,
   doses: number,
 ): InjectionUseAllocation[] | string {
-  if (allocations == null) return []
-  const filled = allocations.filter((item) => item.locationId && item.doses > 0)
-  if (filled.length === 0) return []
-  const ids = filled.map((item) => item.locationId)
+  const filled = (allocations ?? []).filter((item) => item.cepaId && item.doses > 0)
+  if (filled.length === 0) return 'Elige la cepa que recibe la inyección.'
+  const ids = filled.map((item) => item.cepaId)
   if (new Set(ids).size !== ids.length) {
-    return 'No repitas la misma jaula. Junta esas cantidades en una sola línea.'
+    return 'No repitas la misma cepa. Junta esas cantidades en una sola línea.'
   }
   for (const item of filled) {
     if (!Number.isInteger(item.doses) || item.doses <= 0) {
-      return 'La cantidad de cada jaula debe ser un número entero mayor a 0.'
+      return 'La cantidad de cada cepa debe ser un número entero mayor a 0.'
     }
-    if (!item.location.trim()) return 'Elige una jaula de la lista.'
+    if (!item.cepaName.trim()) return 'Elige una cepa de la lista.'
   }
   const sum = filled.reduce((total, item) => total + item.doses, 0)
   if (sum !== doses) {
-    return `Las cantidades de las jaulas deben sumar ${doses} dosis.`
+    return `Las cantidades de las cepas deben sumar ${doses} dosis.`
   }
   return filled
 }
@@ -233,25 +232,34 @@ export function PharmacyProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const addInjection = useCallback((name: string, lines: InjectionLine[]): string | null => {
+  const addInjection = useCallback((name: string, lines: InjectionLine[], description?: string): string | null => {
     const trimmed = name.trim()
     if (!trimmed) return 'Indica el nombre de la inyección.'
     const valid = validLines(lines)
     if (typeof valid === 'string') return valid
-    const injection: Injection = { id: uid(), name: trimmed, lines: valid }
+    const note = description?.trim()
+    const injection: Injection = {
+      id: uid(),
+      name: trimmed,
+      lines: valid,
+      ...(note ? { description: note } : {}),
+    }
     setState((s) => ({ ...s, injections: [...s.injections, injection] }))
     return null
   }, [])
 
-  const updateInjection = useCallback((id: string, name: string, lines: InjectionLine[]): string | null => {
+  const updateInjection = useCallback((id: string, name: string, lines: InjectionLine[], description?: string): string | null => {
     const trimmed = name.trim()
     if (!trimmed) return 'Indica el nombre de la inyección.'
     const valid = validLines(lines)
     if (typeof valid === 'string') return valid
+    const note = description?.trim()
     setState((s) => ({
       ...s,
       injections: s.injections.map((item) =>
-        item.id === id ? { ...item, name: trimmed, lines: valid } : item,
+        item.id === id
+          ? { id, name: trimmed, lines: valid, ...(note ? { description: note } : {}) }
+          : item,
       ),
     }))
     return null
